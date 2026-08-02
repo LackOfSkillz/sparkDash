@@ -7,6 +7,7 @@ import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
 import { ClusterSummary } from "./ClusterSummary";
 import { ClusterLlmPanel } from "./ClusterLlmPanel";
+import { SshLaunchRow } from "./SshLaunchRow";
 import {
   activeLlm,
   clusterInterface,
@@ -578,6 +579,11 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       </div>
 
       {isCluster && <ClusterLlmPanel sparks={visibleSparks} tpsHistory={tpsHistory} />}
+
+      {/* Terminal launchers, aligned one-per-card in the space the panels already left free.
+          Outside the cards on purpose: a button inside one would compete with card selection
+          and drag reordering. */}
+      <SshLaunchRow sparks={visibleSparks} />
     </div>
   );
 }

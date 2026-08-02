@@ -18,6 +18,7 @@ import {
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
+import { launchSshShell } from "./sshShell.js";
 
 dotenv.config();
 
@@ -306,6 +307,25 @@ app.post("/api/sparks/:id/test", async (req, res) => {
       hasPassword: registry.hasPassword(req.params.id),
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Local SSH terminal launch ──────────────────────────
+// The client sends a Spark ID in the URL and nothing else. Host, user and every ssh argument
+// are derived server-side from the registry — see sshShell.js. A body, if one is sent, is
+// ignored on purpose: there is no field the browser could add that would change the command.
+app.post("/api/sparks/:id/ssh-shell", async (req, res) => {
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+
+    const result = await launchSshShell(spark);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    // The resolved target names a host, never a credential or key path.
+    res.json({ success: true, id: spark.id, target: result.target });
+  } catch (err) {
+    // Message only — a stack trace here would describe the operator's filesystem.
     res.status(500).json({ error: err.message });
   }
 });

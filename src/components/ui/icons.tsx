@@ -173,6 +173,16 @@ export function RotateIcon({ className = "" }: { className?: string }) {
   );
 }
 
+/** Console window with a prompt caret — used for the SSH shell launch actions. */
+export function TerminalIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="M6 9l3 3-3 3M12.5 15H17" />
+    </svg>
+  );
+}
+
 /** Power symbol — used for graceful shutdown. */
 export function PowerOffIcon({ className = "" }: { className?: string }) {
   return (

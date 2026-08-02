@@ -201,9 +201,10 @@ function DashboardApp() {
 
   // Horizontal breathing room is kept; the vertical half is halved. Outer page padding is the
   // cheapest height on the screen — at compact density it costs the overview most of a panel
-  // row while showing nothing.
+  // row while showing nothing. The bottom is trimmed furthest because the overview's last row
+  // is a set of buttons, which already carry their own visual padding.
   return (
-    <div className="min-h-screen p-0 text-text sm:px-8 sm:py-4">
+    <div className="min-h-screen p-0 text-text sm:px-8 sm:pb-2 sm:pt-4">
       <div className="dashboard-shell">
         <header className="flex flex-wrap items-center gap-3" style={{ marginBottom: "var(--density-header-gap)" }}>
           <button
@@ -213,7 +214,7 @@ function DashboardApp() {
           >
             <BoltIcon className="h-3.5 w-3.5 text-accent" />
             <span>
-              spark<span className="logo-pill-dash">Dash</span>
+              Aetos<span className="logo-pill-dash">Dash</span>
             </span>
           </button>
           <SparkTabs
