@@ -10,7 +10,7 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { GearIcon, BoltIcon } from "./components/ui/icons";
+import { GearIcon, EagleIcon } from "./components/ui/icons";
 import { OVERVIEW_ID } from "./constants";
 import type { Settings, SparkSnapshot } from "./api/types";
 
@@ -212,7 +212,7 @@ function DashboardApp() {
             onClick={() => navigate(OVERVIEW_ID)}
             className="logo-pill"
           >
-            <BoltIcon className="h-3.5 w-3.5 text-accent" />
+            <EagleIcon className="h-4 w-4" />
             <span>
               Aetos<span className="logo-pill-dash">Dash</span>
             </span>

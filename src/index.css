@@ -1584,10 +1584,10 @@ input[type="checkbox"] {
   flex-shrink: 0;
   text-decoration: none;
 }
-.showcase-brand__bolt {
-  width: 0.9rem;
-  height: 0.9rem;
-  color: var(--color-accent);
+.showcase-brand__mark {
+  /* No color here: the brand mark is an image with its own gold, not a currentColor icon. */
+  width: 1.05rem;
+  height: 1.05rem;
   flex-shrink: 0;
 }
 
