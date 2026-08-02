@@ -1,10 +1,22 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
 import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ClusterSummary } from "./ClusterSummary";
+import { ClusterLlmPanel } from "./ClusterLlmPanel";
+import {
+  activeLlm,
+  clusterInterface,
+  displayRole,
+  findHead,
+  formatUptime,
+  lanInterface,
+  primaryProcess,
+  rootDisk,
+} from "./clusterModel";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -75,11 +87,13 @@ function MiniStat({
 
 function SparkCard({
   spark,
+  allSparks,
   headSparkName,
   temperatureUnit,
   onSelect,
 }: {
   spark: SparkSnapshot;
+  allSparks: SparkSnapshot[];
   headSparkName?: string | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
@@ -134,11 +148,14 @@ function SparkCard({
         </span>
         {(() => {
           const role = resolveSparkRole(spark);
-          const text =
-            role === "head" ? "Head" : role === "worker" ? "Worker" : "Standalone";
+          // Presentation-only: a `standalone` Spark that heads a worker reads as HEAD.
+          // Nothing persisted is rewritten — see displayRole().
+          const text = displayRole(spark, allSparks);
           const title =
-            role === "head"
-              ? "Cluster head Spark"
+            text === "HEAD"
+              ? role === "head"
+                ? "Cluster head Spark"
+                : "Serving the cluster model — persisted role is 'standalone'"
               : role === "worker"
                 ? spark.workerLabel?.trim()
                   ? `${spark.workerLabel.trim()} · distributed LLM worker`
@@ -155,6 +172,11 @@ function SparkCard({
             </span>
           );
         })()}
+        {online && spark.uptime != null && (
+          <span className="shrink-0 text-[10px] tracking-wide text-muted" title="Node uptime as reported by the node">
+            {formatUptime(spark.uptime)}
+          </span>
+        )}
         <span className="text-[10px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
         </span>
@@ -269,9 +291,63 @@ function SparkCard({
             })()}
           </div>
 
+          {/* CPU / RAM — previously only on the detail page, but needed to judge a node at a glance. */}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+            <MiniStat
+              label="CPU"
+              value={
+                spark.metrics.cpu
+                  ? `${Math.round(spark.metrics.cpu.usage)}%${
+                      spark.metrics.cpu.draw ? ` · ${spark.metrics.cpu.draw.toFixed(1)}W` : ""
+                    }`
+                  : "—"
+              }
+              tone={(spark.metrics.cpu?.usage ?? 0) > 85 ? "danger" : "default"}
+            />
+            <MiniStat
+              label="RAM"
+              value={
+                spark.metrics.ram
+                  ? `${fmtStorage(spark.metrics.ram.used, false)} / ${fmtStorage(spark.metrics.ram.total, true)}`
+                  : "—"
+              }
+              tone={(spark.metrics.ram?.percentage ?? 0) > 90 ? "warning" : "default"}
+              bold={false}
+            />
+          </div>
+
+          {/* Connectivity — LAN for management, cluster address for the interconnect. */}
           {(() => {
-            const llmArr = spark.metrics.llm;
-            const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
+            const lan = lanInterface(spark);
+            const roce = clusterInterface(spark);
+            if (!lan && !roce) return null;
+            return (
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+                <MiniStat label="LAN" value={lan?.ip ?? "—"} bold={false} title={lan?.name} />
+                <MiniStat
+                  label={roce ? `Cluster · ${roce.name}` : "Cluster"}
+                  value={roce?.ip ?? "—"}
+                  tone={roce ? "accent" : "default"}
+                  bold={false}
+                  title={roce ? `${roce.name} — direct interconnect` : "No cluster interface detected"}
+                />
+              </div>
+            );
+          })()}
+
+          {/* Primary compute process — identifies which TP rank this node is actually running. */}
+          {(() => {
+            const proc = primaryProcess(spark);
+            if (!proc) return null;
+            return (
+              <div className="border-t border-border pt-3.5">
+                <MiniStat label="Compute process" value={proc} tone="accent" bold={false} wrap />
+              </div>
+            );
+          })()}
+
+          {(() => {
+            const llm = activeLlm(spark);
             if (!llm) return null;
             return (
               <div className="mt-3.5 border-t border-border pt-3 text-center">
@@ -293,6 +369,19 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+
+  // Short in-memory trace of head generation tok/s, so the cluster panel can show a trend.
+  // Deliberately not persisted and not a time series — it exists only for the sparkline, and
+  // resets on reload. Historical ranges are Phase 2.
+  const [tpsHistory, setTpsHistory] = useState<number[]>([]);
+  const lastTpsRef = useRef<number | null>(null);
+  const headTps = activeLlm(findHead(sparks))?.generationTps ?? null;
+  useEffect(() => {
+    if (headTps === null) return;
+    if (lastTpsRef.current === headTps) return;
+    lastTpsRef.current = headTps;
+    setTpsHistory((prev) => [...prev, headTps].slice(-40));
+  }, [headTps]);
 
   const onlineShutdownCount = sparks.filter((s) => s.online).length;
 
@@ -366,6 +455,10 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
 
   const onlineCount = visibleSparks.filter((s) => s.online).length;
 
+  // A "cluster" is a head plus at least one worker. Anything else keeps the original overview.
+  const head = findHead(visibleSparks);
+  const isCluster = head !== null && visibleSparks.length > 1;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
       <div className="flex flex-wrap items-end justify-between gap-6">
@@ -419,11 +512,23 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         description={`Gracefully shut down all ${onlineShutdownCount} online Spark${onlineShutdownCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
         confirmLabel="Shut down all"
       />
-      <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
+      {/* Cluster view only appears once there is a cluster to describe — a single Spark keeps
+          the original plain overview rather than gaining a header that says "1 node". */}
+      {isCluster && <ClusterSummary sparks={visibleSparks} />}
+
+      <div
+        className={
+          isCluster
+            ? "overview-page grid sm:grid-cols-2"
+            : "overview-page grid sm:grid-cols-2 lg:grid-cols-3"
+        }
+        style={{ gap: "var(--density-page-gap)" }}
+      >
         {visibleSparks.map((spark) => (
           <SparkCard
             key={spark.id}
             spark={spark}
+            allSparks={sparks}
             headSparkName={
               spark.workerHeadId
                 ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null
@@ -434,6 +539,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           />
         ))}
       </div>
+
+      {isCluster && <ClusterLlmPanel sparks={visibleSparks} tpsHistory={tpsHistory} />}
     </div>
   );
 }
