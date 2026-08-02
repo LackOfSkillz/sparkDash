@@ -47,8 +47,8 @@ function Field({
               : "text-text-strong";
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[10px] uppercase tracking-wide text-muted">{label}</span>
-      <span className={`font-tabular truncate text-[13px] font-semibold ${toneClass}`} title={title ?? value}>
+      <span className="text-[12px] uppercase leading-none tracking-wide text-muted">{label}</span>
+      <span className={`font-tabular truncate text-[15px] font-semibold leading-tight ${toneClass}`} title={title ?? value}>
         {value}
       </span>
     </div>
@@ -93,7 +93,7 @@ export function ClusterSummary({
         />
         <span className="text-[15px] font-semibold text-text-strong">{clusterName}</span>
         <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+          className={`rounded px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ${
             state === "healthy" ? "bg-success/15 text-success" : state === "degraded" ? "bg-warning/15 text-warning" : "bg-accent/10 text-muted"
           }`}
           title={
@@ -106,19 +106,19 @@ export function ClusterSummary({
         </span>
         {generating && (
           <span
-            className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
+            className="rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-accent"
             title="The head endpoint reports work in flight"
           >
             Active
           </span>
         )}
-        <span className="ml-auto text-[11px] text-muted">
+        <span className="ml-auto text-[13px] text-muted">
           {onlineCount}/{sparks.length} nodes online
         </span>
       </div>
 
       {/* Identity + model facts */}
-      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-3 grid grid-cols-2 gap-x-2 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
         <Field label="Model" value={llm?.modelId ?? "—"} tone="accent" title={llm?.modelId ?? undefined} />
         <Field
           label="Backend"
@@ -151,7 +151,7 @@ export function ClusterSummary({
       </div>
 
       {/* Aggregate strip */}
-      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-3 grid grid-cols-2 gap-x-2 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
         <Field
           label={partial ? `Cluster VRAM (${agg.reporting}/${agg.expected})` : "Cluster VRAM"}
           value={fmtPair(agg.vramUsed, agg.vramTotal)}
@@ -204,7 +204,7 @@ export function ClusterSummary({
       </div>
 
       {partial && (
-        <p className="mt-2.5 text-[10px] text-muted">
+        <p className="mt-2.5 text-[12px] text-muted">
           Aggregates cover {agg.reporting} of {agg.expected} nodes — a node is not reporting, so
           totals are partial rather than cluster-wide.
         </p>

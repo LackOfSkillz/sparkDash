@@ -52,6 +52,7 @@ function MiniStat({
   bold = true,
   title,
   wrap = false,
+  span = 1,
 }: {
   label: string;
   value: string;
@@ -60,6 +61,9 @@ function MiniStat({
   title?: string;
   /** Allow value to wrap (no ellipsis trim) — used for long model ids. */
   wrap?: boolean;
+  /** Column span within the parent 4-column grid. Rows that fill only two cells donate
+   *  their unused columns rather than truncating a value that has room beside it. */
+  span?: 1 | 2 | 3;
 }) {
   const toneClass =
     tone === "danger"
@@ -72,10 +76,10 @@ function MiniStat({
             ? "text-success"
             : "text-text";
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[10px] tracking-wide text-muted">{label}</span>
+    <div className={`flex min-w-0 flex-col gap-0.5 ${span === 3 ? "col-span-3" : span === 2 ? "col-span-2" : ""}`}>
+      <span className="text-[12px] leading-none tracking-wide text-muted">{label}</span>
       <span
-        className={`font-tabular text-[13px] ${
+        className={`font-tabular text-[15px] leading-tight ${
           wrap
             ? "whitespace-normal break-words leading-snug [overflow-wrap:anywhere]"
             : "truncate"
@@ -168,7 +172,7 @@ function SparkCard({
                   : "Standalone Spark";
           return (
             <span
-              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
+              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-accent"
               title={title}
             >
               {text}
@@ -176,18 +180,18 @@ function SparkCard({
           );
         })()}
         {online && spark.uptime != null && (
-          <span className="shrink-0 text-[10px] tracking-wide text-muted" title="Node uptime as reported by the node">
+          <span className="shrink-0 text-[12px] tracking-wide text-muted" title="Node uptime as reported by the node">
             {formatUptime(spark.uptime)}
           </span>
         )}
-        <span className="text-[10px] uppercase tracking-wide text-muted">
+        <span className="text-[12px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
         </span>
       </div>
 
       {!online || !gpu ? (
         <div className="flex h-[120px] items-center justify-center">
-          <span className="text-[13px] text-muted">
+          <span className="text-[15px] text-muted">
             {online ? "Waiting for metrics…" : "Host unreachable"}
           </span>
         </div>
@@ -243,8 +247,10 @@ function SparkCard({
                   <MiniStat
                     label="Storage"
                     value={`${fmtStorage(rootDisk.used, false)} / ${fmtStorage(rootDisk.total, true)}`}
+                    title={`${fmtStorage(rootDisk.used, true)} used of ${fmtStorage(rootDisk.total, true)} (${rootDisk.percentage}%)`}
                     tone={rootDisk.percentage > 85 ? "danger" : rootDisk.percentage > 60 ? "warning" : "default"}
                     bold={false}
+                    wrap
                   />
                 );
               }
@@ -317,6 +323,7 @@ function SparkCard({
               }
               tone={(spark.metrics.ram?.percentage ?? 0) > 90 ? "warning" : "default"}
               bold={false}
+              span={2}
             />
           </div>
 
@@ -343,6 +350,7 @@ function SparkCard({
                 <MiniStat
                   label="RoCE"
                   value={roceValue}
+                  span={3}
                   tone={health === "healthy" ? "accent" : health === "degraded" ? "warning" : "default"}
                   bold={false}
                   title={
@@ -365,13 +373,14 @@ function SparkCard({
             return (
               <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-0">
                 {proc ? (
-                  <MiniStat label="Compute process" value={proc} tone="accent" bold={false} />
+                  <MiniStat label="Compute process" value={proc} tone="accent" bold={false} span={2} />
                 ) : (
                   <span />
                 )}
                 {port && (
                   <MiniStat
                     label="RDMA"
+                    span={2}
                     value={hasRate ? `↑ ${fmtRate(port.txBytesPerSecond)}  ↓ ${fmtRate(port.rxBytesPerSecond)}` : "—"}
                     bold={false}
                     title={

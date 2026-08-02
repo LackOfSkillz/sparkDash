@@ -40,8 +40,8 @@ function Stat({
             : "text-text-strong";
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[10px] uppercase tracking-wide text-muted">{label}</span>
-      <span className={`font-tabular truncate text-[13px] font-semibold ${toneClass}`} title={title ?? value}>
+      <span className="text-[12px] uppercase leading-none tracking-wide text-muted">{label}</span>
+      <span className={`font-tabular truncate text-[15px] font-semibold leading-tight ${toneClass}`} title={title ?? value}>
         {value}
       </span>
     </div>
@@ -65,9 +65,9 @@ export function ClusterLlmPanel({
       <div className="panel" style={{ padding: "var(--density-card-pad)" }}>
         <div className="flex items-center gap-2.5">
           <span className="h-2 w-2 shrink-0 rounded-full bg-muted" />
-          <span className="text-[13px] font-semibold text-text-strong">Cluster inference</span>
+          <span className="text-[15px] font-semibold text-text-strong">Cluster inference</span>
         </div>
-        <p className="mt-3 text-[13px] text-muted">
+        <p className="mt-3 text-[15px] text-muted">
           No model endpoint is answering. The panel stays blank rather than showing zeros, because
           an idle engine and an unreachable one are different states.
         </p>
@@ -84,15 +84,15 @@ export function ClusterLlmPanel({
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
         <span className="h-2 w-2 shrink-0 rounded-full bg-success dot-glow-success" />
         <span
-          className="text-[13px] font-semibold text-text-strong"
+          className="text-[15px] font-semibold text-text-strong"
           title="Measured at the head endpoint. Latency figures are server-lifetime p95, not per-request."
         >
           Cluster inference
         </span>
-        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent">
+        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-accent">
           {llm.backend === "vllm" ? "vLLM" : (llm.backend ?? "llm")}
         </span>
-        <span className="min-w-0 truncate text-[13px] text-text" title={llm.modelId ?? undefined}>
+        <span className="min-w-0 truncate text-[15px] text-text" title={llm.modelId ?? undefined}>
           {llm.modelId ?? "unknown model"}
         </span>
         <span className="ml-auto flex items-center gap-3">
@@ -100,8 +100,8 @@ export function ClusterLlmPanel({
           <span className="font-tabular text-[22px] font-bold leading-none text-text-strong">
             {llm.generationTps.toFixed(1)}
           </span>
-          <span className="text-[12px] text-muted">tok/s</span>
-          {head && <span className="text-[11px] text-muted">:{head.llmPort}</span>}
+          <span className="text-[14px] text-muted">tok/s</span>
+          {head && <span className="text-[13px] text-muted">:{head.llmPort}</span>}
         </span>
       </div>
 
