@@ -3,6 +3,7 @@ import path from "path";
 import { HOST_PATHS, GPU_MEMORY_JSON_PATH, DGX_SPARK, HARDWARE_DEFAULTS } from "../config.js";
 import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
+import { parseRdmaPorts, rdmaProbeCommand, toRdmaPortMetrics } from "./rdma.js";
 
 /**
  * SystemCollector — collects hardware metrics for a Spark.
@@ -16,6 +17,8 @@ export class SystemCollector {
 
     // Rate-tracking baselines
     this.lastNetworkStats = new Map();
+    /** Previous RDMA counter sample per "hca/port" — rates need a delta, not a snapshot. */
+    this.lastRdmaStats = new Map();
     this.lastCpuStat = null;
     /** Last computed CPU usage percentage (0-100) — used by GPU system-draw estimate. */
     this.lastCpuUsagePct = 0;
@@ -1006,6 +1009,11 @@ export class SystemCollector {
         "echo '---'",
         // WoL MAC for the primary LAN NIC on DGX Spark
         `cat /sys/class/net/${WOL_INTERFACE}/address 2>/dev/null || true`,
+        "echo '---'",
+        // RDMA/RoCE port state + hardware counters. Appended to this existing command rather
+        // than polled separately, so no additional SSH session per node is introduced. Hosts
+        // without RDMA emit nothing, which parses to an empty list.
+        rdmaProbeCommand(),
       ].join("; ");
 
       const output = await sshExec(this.spark, cmd);
@@ -1015,6 +1023,7 @@ export class SystemCollector {
       const ipOut = sections[2]?.trim() || "";
       const operstateOut = sections[3]?.trim() || "";
       const wolMac = normalizeMac(sections[4]?.trim() || "");
+      const rdmaOut = sections[5]?.trim() || "";
 
       // Parse operstate lines ("enP7s7:up")
       const operstateMap = new Map();
@@ -1101,10 +1110,43 @@ export class SystemCollector {
         }
       }
 
-      return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac };
+      const rdma = this._buildRdmaMetrics(rdmaOut, ipMap, now);
+
+      return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac, rdma };
     } catch (err) {
       console.error(`[SystemCollector] Remote Network error for ${this.spark.id}:`, err.message);
       return this._defaultNetwork();
+    }
+  }
+
+  /**
+   * Turn the RDMA sysfs dump into API metrics, deriving rates against the previous sample.
+   *
+   * Rates come from the HCA's own counters, not netdev — RDMA bypasses the kernel stack, so
+   * netdev bytes stay near zero while the link is busy. Per-port previous samples live in
+   * `lastRdmaStats`, keyed by device and port so a counter reset on one port cannot corrupt
+   * another's rate.
+   */
+  _buildRdmaMetrics(rdmaOut, ipMap, now) {
+    try {
+      const raw = parseRdmaPorts(rdmaOut);
+      if (raw.length === 0) return [];
+      return raw.map((p) => {
+        const key = `${p.hca}/${p.port}`;
+        const ip = p.netdev ? ipMap.get(p.netdev) ?? null : null;
+        const metrics = toRdmaPortMetrics(p, this.lastRdmaStats.get(key), now, ip);
+        if (metrics.txBytes !== null || metrics.rxBytes !== null) {
+          this.lastRdmaStats.set(key, {
+            txBytes: metrics.txBytes,
+            rxBytes: metrics.rxBytes,
+            time: now,
+          });
+        }
+        return metrics;
+      });
+    } catch {
+      // RDMA telemetry is additive; never let it break ordinary network collection.
+      return [];
     }
   }
 
@@ -1295,7 +1337,7 @@ export class SystemCollector {
   }
 
   _defaultNetwork() {
-    return { primaryInterface: null, linkSpeedMbps: null, interfaces: [], wolMac: null };
+    return { primaryInterface: null, linkSpeedMbps: null, interfaces: [], wolMac: null, rdma: [] };
   }
 
   _defaultUnifiedMemory() {

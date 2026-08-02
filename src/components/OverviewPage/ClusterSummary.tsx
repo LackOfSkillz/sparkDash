@@ -2,12 +2,15 @@ import type { SparkSnapshot } from "../../api/types";
 import {
   activeLlm,
   aggregate,
+  clusterLinkTraffic,
+  clusterRdmaHealth,
+  clusterRdmaPort,
   clusterState,
   findHead,
   findWorkers,
   fmtInt,
-  fmtMb,
   fmtPair,
+  fmtRate,
   isGenerating,
 } from "./clusterModel";
 
@@ -66,6 +69,9 @@ export function ClusterSummary({
   const state = clusterState(sparks);
   const onlineCount = sparks.filter((s) => s.online).length;
   const generating = isGenerating(llm);
+  const rdma = clusterRdmaHealth(sparks);
+  const headPort = head ? clusterRdmaPort(head) : null;
+  const link = clusterLinkTraffic(sparks);
 
   // TP size is a configured fact, not something we can currently probe. Label it that way.
   const tpSize = head && workers.length > 0 ? workers.length + 1 : null;
@@ -112,7 +118,7 @@ export function ClusterSummary({
       </div>
 
       {/* Identity + model facts */}
-      <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-border pt-3.5 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
         <Field label="Model" value={llm?.modelId ?? "—"} tone="accent" title={llm?.modelId ?? undefined} />
         <Field
           label="Backend"
@@ -145,7 +151,7 @@ export function ClusterSummary({
       </div>
 
       {/* Aggregate strip */}
-      <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-border pt-3.5 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-3 lg:grid-cols-6">
         <Field
           label={partial ? `Cluster VRAM (${agg.reporting}/${agg.expected})` : "Cluster VRAM"}
           value={fmtPair(agg.vramUsed, agg.vramTotal)}
@@ -154,7 +160,9 @@ export function ClusterSummary({
           label={partial ? `Cluster RAM (${agg.reporting}/${agg.expected})` : "Cluster RAM"}
           value={fmtPair(agg.ramUsed, agg.ramTotal)}
         />
-        <Field label="Cluster storage" value={fmtPair(agg.storageUsed, agg.storageTotal)} />
+        {/* Cluster storage was removed from this strip to make room for the interconnect
+            without adding a third row. Both node cards still show their own storage, and a
+            filling root disk is far less urgent than a dead RoCE link on a TP=2 cluster. */}
         <Field
           label="GPU power"
           value={agg.gpuPowerDraw === null ? "—" : `${agg.gpuPowerDraw.toFixed(1)} W`}
@@ -167,17 +175,38 @@ export function ClusterSummary({
           label="Avg GPU"
           value={agg.avgGpuUsage === null ? "—" : `${Math.round(agg.avgGpuUsage)}%`}
         />
+        <Field
+          label="Interconnect"
+          value={
+            rdma === "healthy"
+              ? `RoCE${headPort?.rateGbps ? ` · ${headPort.rateGbps} Gb/s` : ""}`
+              : rdma === "degraded"
+                ? "RoCE degraded"
+                : "—"
+          }
+          tone={rdma === "healthy" ? "success" : rdma === "degraded" ? "warning" : "muted"}
+          title={
+            headPort
+              ? `${headPort.hca} · ${headPort.netdev ?? "?"} · ${headPort.state ?? "?"} / ${headPort.physicalState ?? "?"} — link state only; NCCL and rank health are not probed`
+              : "No RDMA device reported"
+          }
+        />
+        <Field
+          label={link.source ? `RDMA · ${link.source}` : "RDMA traffic"}
+          value={
+            link.txBytesPerSecond === null && link.rxBytesPerSecond === null
+              ? "—"
+              : `↑ ${fmtRate(link.txBytesPerSecond)}  ↓ ${fmtRate(link.rxBytesPerSecond)}`
+          }
+          tone={(link.txBytesPerSecond ?? 0) > 1024 * 1024 ? "accent" : "default"}
+          title="Head-side hardware counters. Not summed with the worker, which mirrors the same bytes."
+        />
       </div>
 
       {partial && (
         <p className="mt-2.5 text-[10px] text-muted">
           Aggregates cover {agg.reporting} of {agg.expected} nodes — a node is not reporting, so
           totals are partial rather than cluster-wide.
-        </p>
-      )}
-      {agg.vramTotal !== null && (
-        <p className="sr-only">
-          Cluster VRAM {fmtMb(agg.vramUsed)} of {fmtMb(agg.vramTotal)}.
         </p>
       )}
     </div>

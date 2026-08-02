@@ -14,7 +14,10 @@ import {
   findHead,
   formatUptime,
   lanInterface,
+  clusterRdmaPort,
+  fmtRate,
   primaryProcess,
+  rdmaHealth,
   rootDisk,
 } from "./clusterModel";
 
@@ -216,7 +219,7 @@ function SparkCard({
           </div>
 
           {/* Secondary stats */}
-          <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+          <div className="mt-3 grid grid-cols-4 gap-x-3 gap-y-2 border-t border-border pt-3">
             <MiniStat
               label="GPU Power"
               value={`${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`}
@@ -291,8 +294,9 @@ function SparkCard({
             })()}
           </div>
 
-          {/* CPU / RAM — previously only on the detail page, but needed to judge a node at a glance. */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+          {/* CPU / RAM / connectivity / process all share one 4-column grid: the values the
+              overview gained this pass had to fit without making the card taller. */}
+          <div className="grid grid-cols-4 gap-x-3 gap-y-2 border-t border-border pt-3">
             <MiniStat
               label="CPU"
               value={
@@ -316,48 +320,72 @@ function SparkCard({
             />
           </div>
 
-          {/* Connectivity — LAN for management, cluster address for the interconnect. */}
+          {/* Connectivity — LAN for management, RoCE for the interconnect. The RoCE cell now
+              carries address, rate and link state on one line, replacing the previous
+              interface-name label rather than adding a row, so card height is unchanged. */}
           {(() => {
             const lan = lanInterface(spark);
-            const roce = clusterInterface(spark);
-            if (!lan && !roce) return null;
+            const port = clusterRdmaPort(spark);
+            const roceIface = clusterInterface(spark);
+            const health = rdmaHealth(port);
+            if (!lan && !port && !roceIface) return null;
+
+            const ip = port?.ip ?? roceIface?.ip ?? null;
+            const roceValue = port
+              ? [ip, port.rateGbps ? `${port.rateGbps} Gb/s` : null, health === "healthy" ? "Active" : (port.state ?? "—")]
+                  .filter(Boolean)
+                  .join(" · ")
+              : (ip ?? "—");
+
             return (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+              <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-0">
                 <MiniStat label="LAN" value={lan?.ip ?? "—"} bold={false} title={lan?.name} />
                 <MiniStat
-                  label={roce ? `Cluster · ${roce.name}` : "Cluster"}
-                  value={roce?.ip ?? "—"}
-                  tone={roce ? "accent" : "default"}
+                  label="RoCE"
+                  value={roceValue}
+                  tone={health === "healthy" ? "accent" : health === "degraded" ? "warning" : "default"}
                   bold={false}
-                  title={roce ? `${roce.name} — direct interconnect` : "No cluster interface detected"}
+                  title={
+                    port
+                      ? `${port.netdev ?? roceIface?.name ?? "?"} · ${port.hca} · ${port.state ?? "?"} / ${port.physicalState ?? "?"} — link state only, not NCCL or rank health`
+                      : "No RDMA device reported for this node"
+                  }
                 />
               </div>
             );
           })()}
 
-          {/* Primary compute process — identifies which TP rank this node is actually running. */}
+          {/* Live RDMA rate, from the HCA counters — netdev bytes stay near zero under RoCE.
+              Shares the compute-process row so no extra line is introduced. */}
           {(() => {
+            const port = clusterRdmaPort(spark);
             const proc = primaryProcess(spark);
-            if (!proc) return null;
+            if (!port && !proc) return null;
+            const hasRate = port && (port.txBytesPerSecond !== null || port.rxBytesPerSecond !== null);
             return (
-              <div className="border-t border-border pt-3.5">
-                <MiniStat label="Compute process" value={proc} tone="accent" bold={false} wrap />
+              <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-0">
+                {proc ? (
+                  <MiniStat label="Compute process" value={proc} tone="accent" bold={false} />
+                ) : (
+                  <span />
+                )}
+                {port && (
+                  <MiniStat
+                    label="RDMA"
+                    value={hasRate ? `↑ ${fmtRate(port.txBytesPerSecond)}  ↓ ${fmtRate(port.rxBytesPerSecond)}` : "—"}
+                    bold={false}
+                    title={
+                      hasRate
+                        ? "From HCA hardware counters (port_xmit_data / port_rcv_data), not netdev"
+                        : "Awaiting a second counter sample — a rate needs a delta"
+                    }
+                  />
+                )}
               </div>
             );
           })()}
 
-          {(() => {
-            const llm = activeLlm(spark);
-            if (!llm) return null;
-            return (
-              <div className="mt-3.5 border-t border-border pt-3 text-center">
-                <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                  {llm.generationTps.toFixed(0)}
-                </span>
-                <span className="text-sm font-normal text-muted"> tok/s</span>
-              </div>
-            );
-          })()}
+
         </>
       )}
     </div>

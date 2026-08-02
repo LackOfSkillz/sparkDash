@@ -178,7 +178,9 @@
   --density-panel-title-mb: 9px;
   --density-card-pad: 14px;
   --density-card-gap: 8px;
-  --density-overview-rhythm: 16px;
+  /* Compact exists so the whole cluster fits one screen. The overview now also carries
+     interconnect state, so the rhythm between its panels is tightened to pay for it. */
+  --density-overview-rhythm: 12px;
   --density-overview-title: 24px;
   --radius-panel: 14px;
   --radius-sm: 8px;

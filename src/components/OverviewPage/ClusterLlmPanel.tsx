@@ -83,7 +83,12 @@ export function ClusterLlmPanel({
       {/* Identity row */}
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
         <span className="h-2 w-2 shrink-0 rounded-full bg-success dot-glow-success" />
-        <span className="text-[13px] font-semibold text-text-strong">Cluster inference</span>
+        <span
+          className="text-[13px] font-semibold text-text-strong"
+          title="Measured at the head endpoint. Latency figures are server-lifetime p95, not per-request."
+        >
+          Cluster inference
+        </span>
         <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent">
           {llm.backend === "vllm" ? "vLLM" : (llm.backend ?? "llm")}
         </span>
@@ -101,7 +106,7 @@ export function ClusterLlmPanel({
       </div>
 
       {/* Throughput + request state */}
-      <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-border pt-3.5 sm:grid-cols-4 lg:grid-cols-8">
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-4 lg:grid-cols-8">
         <Stat label="Engine" value="Active" tone="success" />
         <Stat label="Prefill tok/s" value={llm.prefillTps > 0 ? llm.prefillTps.toFixed(1) : "—"} />
         <Stat label="Total generated" value={fmtInt(llm.totalOutputTokens)} />
@@ -121,7 +126,7 @@ export function ClusterLlmPanel({
       </div>
 
       {/* Latency + capacity + topology */}
-      <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-border pt-3.5 sm:grid-cols-4 lg:grid-cols-8">
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3 sm:grid-cols-4 lg:grid-cols-8">
         <Stat label="TTFT p95" value={fmtSeconds(llm.ttftP95Seconds)} />
         <Stat label="E2E p95" value={fmtSeconds(llm.e2eP95Seconds)} />
         <Stat label="ITL p95" value={fmtSeconds(llm.itlP95Seconds)} />
@@ -143,9 +148,6 @@ export function ClusterLlmPanel({
         />
       </div>
 
-      <p className="mt-2.5 text-[10px] text-muted">
-        Measured at the head endpoint. Latency figures are server-lifetime p95, not per-request.
-      </p>
     </div>
   );
 }

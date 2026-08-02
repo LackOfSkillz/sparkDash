@@ -199,8 +199,11 @@ function DashboardApp() {
     }
   }, []);
 
+  // Horizontal breathing room is kept; the vertical half is halved. Outer page padding is the
+  // cheapest height on the screen — at compact density it costs the overview most of a panel
+  // row while showing nothing.
   return (
-    <div className="min-h-screen p-0 text-text sm:p-8">
+    <div className="min-h-screen p-0 text-text sm:px-8 sm:py-4">
       <div className="dashboard-shell">
         <header className="flex flex-wrap items-center gap-3" style={{ marginBottom: "var(--density-header-gap)" }}>
           <button

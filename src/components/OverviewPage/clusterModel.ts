@@ -1,4 +1,4 @@
-import type { LlmMetrics, SparkSnapshot } from "../../api/types";
+import type { LlmMetrics, RdmaPortMetrics, SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 
 /**
@@ -193,4 +193,80 @@ export function lanInterface(spark: SparkSnapshot) {
   if (!Array.isArray(ifaces)) return null;
   const up = ifaces.filter((i) => i.operstate === "up" && i.ip);
   return up.find((i) => !i.ip?.startsWith("192.168.10.")) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// RoCE / RDMA interconnect
+// ---------------------------------------------------------------------------
+
+export type RdmaHealth = "healthy" | "degraded" | "unavailable";
+
+/**
+ * The RDMA port carrying this node's cluster traffic.
+ *
+ * Prefers an ACTIVE port that actually holds an IPv4 address, which is what excludes the
+ * similarly named second HCA on these machines — it reports LinkUp but carries no address and
+ * would otherwise look like a valid choice.
+ */
+export function clusterRdmaPort(spark: SparkSnapshot): RdmaPortMetrics | null {
+  const ports = spark.metrics.network?.rdma;
+  if (!Array.isArray(ports) || ports.length === 0) return null;
+  const addressed = ports.filter((p) => p.ip);
+  const activeAddressed = addressed.find((p) => (p.state ?? "").toUpperCase() === "ACTIVE");
+  return activeAddressed ?? addressed[0] ?? ports.find((p) => (p.state ?? "").toUpperCase() === "ACTIVE") ?? null;
+}
+
+/**
+ * Link health for one port. Traffic is deliberately NOT an input — an idle interconnect
+ * legitimately sits at 0 B/s, and marking that unhealthy would teach the reader to ignore the
+ * field. This describes the LINK, and says nothing about NCCL or tensor-parallel rank health.
+ */
+export function rdmaHealth(port: RdmaPortMetrics | null): RdmaHealth {
+  if (!port) return "unavailable";
+  const active = (port.state ?? "").toUpperCase() === "ACTIVE";
+  const linkUp = (port.physicalState ?? "").toUpperCase().replace(/[^A-Z]/g, "") === "LINKUP";
+  if (active && linkUp && port.rateGbps && port.ip) return "healthy";
+  if (port.state || port.physicalState || port.rateGbps) return "degraded";
+  return "unavailable";
+}
+
+/** Cluster interconnect health. Both ends must be healthy — a one-sided link is not a link. */
+export function clusterRdmaHealth(sparks: SparkSnapshot[]): RdmaHealth {
+  const online = sparks.filter((s) => s.online);
+  if (online.length === 0) return "unavailable";
+  const healths = online.map((s) => rdmaHealth(clusterRdmaPort(s)));
+  if (healths.every((h) => h === "unavailable")) return "unavailable";
+  if (healths.every((h) => h === "healthy")) return "healthy";
+  return "degraded";
+}
+
+/**
+ * Cluster link traffic, taken from the HEAD side only.
+ *
+ * On a point-to-point link the worker's RX mirrors the head's TX. Summing both ends would
+ * roughly double-count the same bytes and present it as unique throughput, so the head's own
+ * counters are reported and labelled as such. Per-node figures remain on the node cards.
+ */
+export function clusterLinkTraffic(sparks: SparkSnapshot[]): {
+  txBytesPerSecond: number | null;
+  rxBytesPerSecond: number | null;
+  source: string | null;
+} {
+  const head = findHead(sparks) ?? sparks.find((s) => activeLlm(s)) ?? null;
+  const port = head ? clusterRdmaPort(head) : null;
+  if (!head || !port) return { txBytesPerSecond: null, rxBytesPerSecond: null, source: null };
+  return {
+    txBytesPerSecond: port.txBytesPerSecond,
+    rxBytesPerSecond: port.rxBytesPerSecond,
+    source: head.name,
+  };
+}
+
+/** Bytes/sec → "1.2 GB/s". Dash when unknown, so a first sample never reads as idle. */
+export function fmtRate(bps: number | null | undefined): string {
+  if (typeof bps !== "number" || !Number.isFinite(bps) || bps < 0) return "—";
+  if (bps >= 1024 ** 3) return `${(bps / 1024 ** 3).toFixed(2)} GB/s`;
+  if (bps >= 1024 ** 2) return `${(bps / 1024 ** 2).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(0)} KB/s`;
+  return `${Math.round(bps)} B/s`;
 }
