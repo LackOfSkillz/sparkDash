@@ -87,6 +87,56 @@ test("generation tok/s remains an instantaneous per-poll rate", () => {
   assert.equal(p.generationTps, 40);
 });
 
+/**
+ * The live companion figure. Same ratio, taken over a rolling window instead of the whole
+ * server history, so it can return to zero. It sits beside generation tok/s in the header,
+ * where a number that never falls back reads as "the engine is busy" when it is idle.
+ */
+
+test("live prefill reports the windowed rate while requests are completing", () => {
+  const p = vllmProbe();
+  p._applyVllmMetrics(body({ prompt: 0, gen: 0, running: 0, ttftSum: 0, ttftCount: 0 }), 1);
+  // 40,000 tokens admitted and 20s of prefill recorded for them.
+  p._applyVllmMetrics(body({ prompt: 40_000, gen: 1, running: 1, ttftSum: 20, ttftCount: 1 }), 1);
+  assert.equal(p.prefillTpsLive, 2000);
+});
+
+test("live prefill falls back to zero once the window contains no prefill", () => {
+  const p = vllmProbe();
+  p._applyVllmMetrics(body({ prompt: 0, gen: 0, running: 0, ttftSum: 0, ttftCount: 0 }), 1);
+  p._applyVllmMetrics(body({ prompt: 40_000, gen: 1, running: 1, ttftSum: 20, ttftCount: 1 }), 1);
+  assert.equal(p.prefillTpsLive, 2000);
+
+  // Idle: counters frozen. Poll past the 20s window.
+  for (let i = 0; i < 25; i++) {
+    p._applyVllmMetrics(body({ prompt: 40_000, gen: 900, running: 0, ttftSum: 20, ttftCount: 1 }), 1);
+  }
+  assert.equal(p.prefillTpsLive, 0, "an idle engine must not keep claiming an input rate");
+  assert.equal(p.prefillTps, 2000, "the lifetime average is unaffected by idleness");
+});
+
+test("live prefill claims nothing while tokens are admitted but no first token has landed", () => {
+  // Admission credits prompt_tokens_total immediately; TTFT is only recorded at first token.
+  // Between those two moments there is no measured prefill time, so there is no rate to report.
+  const p = vllmProbe();
+  p._applyVllmMetrics(body({ prompt: 0, gen: 0, running: 0, ttftSum: 0, ttftCount: 0 }), 1);
+  p._applyVllmMetrics(body({ prompt: 80_000, gen: 0, running: 1, ttftSum: 0, ttftCount: 0 }), 1);
+  assert.equal(p.prefillTpsLive, 0, "80,000 / one poll would report tens of thousands of tok/s");
+});
+
+test("live prefill recovers after a window has rolled off", () => {
+  const p = vllmProbe();
+  p._applyVllmMetrics(body({ prompt: 0, gen: 0, running: 0, ttftSum: 0, ttftCount: 0 }), 1);
+  p._applyVllmMetrics(body({ prompt: 40_000, gen: 1, running: 1, ttftSum: 20, ttftCount: 1 }), 1);
+  for (let i = 0; i < 25; i++) {
+    p._applyVllmMetrics(body({ prompt: 40_000, gen: 900, running: 0, ttftSum: 20, ttftCount: 1 }), 1);
+  }
+  assert.equal(p.prefillTpsLive, 0);
+  // A second request: 10,000 more tokens over 4 more seconds of prefill.
+  p._applyVllmMetrics(body({ prompt: 50_000, gen: 901, running: 1, ttftSum: 24, ttftCount: 2 }), 1);
+  assert.equal(p.prefillTpsLive, 2500, "the new window measures the new request, not the old one");
+});
+
 test("a realistic server-lifetime scrape yields a plausible average", () => {
   // Real values read from the cluster: 1,163,986 prompt tokens over 453s of prefill.
   const p = vllmProbe();

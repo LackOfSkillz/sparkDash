@@ -76,6 +76,16 @@ export class LlmProbe {
     this.slotsTotal = 0;
     this.generationTps = 0;
     this.prefillTps = 0;
+    /**
+     * Live counterpart to `prefillTps` on the vLLM path, where that field is a lifetime
+     * average and therefore never returns to zero. This one is measured over a short rolling
+     * window and reads 0 when nothing prefilled recently, so it can sit beside generationTps
+     * without implying the engine is busy. Every other backend already reports prefillTps as
+     * a per-poll rate, so for them the two are the same number.
+     */
+    this.prefillTpsLive = 0;
+    /** Rolling window of vLLM prefill observations: {t, tokens, ttftSum, ttftCount}. */
+    this._prefillWindow = [];
     /** Running count from the previous poll, to spot the moment a request starts. */
     this._prevRunning = 0;
     /** Prompt tokens admitted but not yet paired with a TTFT observation. */
@@ -182,6 +192,8 @@ export class LlmProbe {
     this.modelPath = null;
     this.generationTps = 0;
     this.prefillTps = 0;
+    this.prefillTpsLive = 0;
+    this._prefillWindow = [];
     this._prevRunning = 0;
     this._pendingPrefillTokens = 0;
     this._lastTtftAgg = { sum: 0, count: 0 };
@@ -504,7 +516,47 @@ export class LlmProbe {
    * @param {string} txt
    * @param {number} dtSec
    */
+  /**
+   * Live prefill rate over a short rolling window.
+   *
+   * Same ratio as the lifetime average — prompt tokens over seconds spent reaching a first
+   * token — but taken across a window instead of the whole server history, so it falls back to
+   * zero once nothing is prefilling. The gate is the TTFT *count*: tokens are credited at
+   * admission, and until at least one request in the window has actually reached its first
+   * token there is no measured prefill time to divide by, and any number would be invented.
+   *
+   * This deliberately trades a little robustness for liveness. An unpaired request — tokens
+   * admitted, no first token ever produced — inflates the window it lands in, exactly the fault
+   * that ruled this approach out for the headline figure. Here it rolls off with the window
+   * instead of accumulating, and `prefillTps` remains the drift-proof number of record.
+   *
+   * Time advances by the caller's poll delta rather than the wall clock, so the window is a
+   * function of observed polls and stays deterministic under test.
+   */
+  _updateLivePrefill(promptTokens, ttftSum, ttftCount) {
+    if (promptTokens == null || ttftSum == null || ttftCount == null) return;
+    const WINDOW_SECONDS = 20;
+    const now = this._prefillClock ?? 0;
+    const w = this._prefillWindow;
+    w.push({ t: now, tokens: promptTokens, ttftSum, ttftCount });
+    while (w.length > 2 && now - w[0].t > WINDOW_SECONDS) w.shift();
+
+    const oldest = w[0];
+    const dTokens = promptTokens - oldest.tokens;
+    const dTtft = ttftSum - oldest.ttftSum;
+    const dCount = ttftCount - oldest.ttftCount;
+    this.prefillTpsLive =
+      dCount > 0 && dTtft > 0 && dTokens > 0
+        ? Math.max(0, Math.round((dTokens / dTtft) * 100) / 100)
+        : 0;
+  }
+
   _applyVllmMetrics(txt, dtSec) {
+    // Observed-poll clock for the live prefill window. A missing or absurd delta still has to
+    // advance time, or a stalled poller would freeze the window open forever.
+    this._prefillClock =
+      (this._prefillClock ?? 0) + (dtSec > 0 && dtSec < 60 ? dtSec : 1);
+
     // Read the running count BEFORE the token counters: the moment a request starts is what
     const running = this._getVllmMetric(txt, "num_requests_running");
     this.requestsRunning = running;
@@ -566,6 +618,7 @@ export class LlmProbe {
     if (ttftSum != null && ttftSum > 0 && promptTokens != null && promptTokens > 0) {
       this.prefillTps = Math.max(0, Math.round((promptTokens / ttftSum) * 100) / 100);
     }
+    this._updateLivePrefill(promptTokens, ttftSum, ttftCount);
     this._vllmPrimed = true;
 
     const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
@@ -1050,6 +1103,9 @@ export class LlmProbe {
       slotsTotal: this.slotsTotal,
       generationTps: this.generationTps,
       prefillTps: this.prefillTps,
+      // Only the vLLM path turns prefillTps into a lifetime average; every other backend
+      // already computes it per poll, so there the live figure is the same number.
+      prefillTpsLive: this.backendType === "vllm" ? this.prefillTpsLive : this.prefillTps,
       totalOutputTokens: this.totalOutputTokens,
       kvCacheUsage: this.kvCacheUsage,
       requestsRunning: this.requestsRunning,
@@ -1077,6 +1133,7 @@ export class LlmProbe {
       slotsTotal: 0,
       generationTps: 0,
       prefillTps: 0,
+      prefillTpsLive: 0,
       totalOutputTokens: 0,
       kvCacheUsage: null,
       requestsRunning: null,

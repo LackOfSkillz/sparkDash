@@ -208,7 +208,14 @@ export interface LlmMetrics {
   slotsActive: number;
   slotsTotal: number;
   generationTps: number;
+  /** On vLLM this is a server-lifetime average and never returns to zero. */
   prefillTps: number;
+  /**
+   * Prefill rate over a short rolling window, so it falls back to zero when nothing is
+   * prefilling. Use this wherever it sits beside generationTps; use `prefillTps` when you
+   * want the stable figure. Optional: older backend builds do not send it.
+   */
+  prefillTpsLive?: number;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
   totalOutputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
