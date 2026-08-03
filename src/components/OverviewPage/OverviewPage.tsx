@@ -33,6 +33,17 @@ function celsiusToFahrenheit(c: number): number {
   return Math.round(c * 9 / 5 + 32);
 }
 
+/**
+ * Both scales, always. The sensor reports Celsius; Fahrenheit is derived, so showing one and
+ * hiding the other only ever costs the reader a conversion. `temperatureUnit` still decides
+ * which is written first, so the preference setting keeps meaning something.
+ */
+function formatTemperature(celsius: number, unit: "celsius" | "fahrenheit"): string {
+  const f = celsiusToFahrenheit(celsius);
+  const c = Math.round(celsius);
+  return unit === "fahrenheit" ? `${f}°F / ${c}°C` : `${c}°C / ${f}°F`;
+}
+
 function formatMb(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${Math.round(mb)} MB`;
@@ -112,8 +123,9 @@ function SparkCard({
 
   const usage = gpu?.usage ?? 0;
   const tempRaw = gpu?.temperature ?? 0;
+  // The bar still fills against the preferred scale; only the caption shows both.
   const displayTemp = temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(tempRaw) : tempRaw;
-  const tempLabel = temperatureUnit === "fahrenheit" ? `${displayTemp}°F` : `${displayTemp}°C`;
+  const tempLabel = formatTemperature(tempRaw, temperatureUnit);
   const vramPct = gpu?.vram?.percentage ?? um?.percentage ?? 0;
   const vramUsed = gpu?.vram?.used ?? um?.used ?? 0;
   const vramTotal = gpu?.vram?.total ?? um?.total ?? 0;
@@ -419,14 +431,28 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   // seconds. A fixed cadence makes the width mean elapsed time and lets idle flatten it out.
   const TPS_TRACE_SECONDS = 60;
   const [tpsHistory, setTpsHistory] = useState<number[]>([]);
-  const headTps = activeLlm(findHead(sparks))?.generationTps ?? null;
+  const [prefillHistory, setPrefillHistory] = useState<number[]>([]);
+  const headLlm = activeLlm(findHead(sparks));
+  const headTps = headLlm?.generationTps ?? null;
+  // The live windowed rate, not the lifetime average — the trace has to be able to reach zero.
+  const headPrefill = headLlm ? (headLlm.prefillTpsLive ?? headLlm.prefillTps) : null;
   const headTpsRef = useRef<number | null>(null);
+  const headPrefillRef = useRef<number | null>(null);
   headTpsRef.current = headTps;
+  headPrefillRef.current = headPrefill;
   useEffect(() => {
     const id = setInterval(() => {
       // No reading yet is not the same as zero, so hold the trace until one arrives.
-      if (headTpsRef.current === null) return;
-      setTpsHistory((prev) => [...prev, headTpsRef.current ?? 0].slice(-TPS_TRACE_SECONDS));
+      if (headTpsRef.current !== null) {
+        setTpsHistory((prev) => [...prev, headTpsRef.current ?? 0].slice(-TPS_TRACE_SECONDS));
+      }
+      // Sampled on the same tick as generation so the two traces in the header describe the
+      // same 60 seconds and can be read against each other.
+      if (headPrefillRef.current !== null) {
+        setPrefillHistory((prev) =>
+          [...prev, headPrefillRef.current ?? 0].slice(-TPS_TRACE_SECONDS),
+        );
+      }
     }, 1000);
     return () => clearInterval(id);
   }, []);
@@ -562,7 +588,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       />
       {/* Cluster view only appears once there is a cluster to describe — a single Spark keeps
           the original plain overview rather than gaining a header that says "1 node". */}
-      {isCluster && <ClusterSummary sparks={visibleSparks} />}
+      {isCluster && <ClusterSummary sparks={visibleSparks} temperatureUnit={temperatureUnit} />}
 
       <div
         className={
@@ -588,7 +614,13 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         ))}
       </div>
 
-      {isCluster && <ClusterLlmPanel sparks={visibleSparks} tpsHistory={tpsHistory} />}
+      {isCluster && (
+        <ClusterLlmPanel
+          sparks={visibleSparks}
+          tpsHistory={tpsHistory}
+          prefillHistory={prefillHistory}
+        />
+      )}
 
       {/* Terminal launchers, aligned one-per-card in the space the panels already left free.
           Outside the cards on purpose: a button inside one would compete with card selection

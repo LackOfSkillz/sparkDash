@@ -57,10 +57,15 @@ function Field({
 
 export function ClusterSummary({
   sparks,
-  clusterName = "GX10 DeepSeek Cluster",
+  // Named for the hardware, not the model — the cluster outlives whatever is loaded on it.
+  clusterName = "AIpocalypse Cluster",
+  temperatureUnit = "celsius",
 }: {
   sparks: SparkSnapshot[];
   clusterName?: string;
+  /** Decides which unit leads. Both are always shown; this only sets the order, so the
+      average here reads the same way round as the per-node temperatures below it. */
+  temperatureUnit?: "celsius" | "fahrenheit";
 }) {
   const head = findHead(sparks);
   const workers = findWorkers(sparks);
@@ -180,7 +185,13 @@ export function ClusterSummary({
         />
         <Field
           label="Avg temp"
-          value={agg.avgGpuTemp === null ? "—" : `${Math.round(agg.avgGpuTemp)}°C`}
+          value={
+            agg.avgGpuTemp === null
+              ? "—"
+              : temperatureUnit === "fahrenheit"
+                ? `${Math.round(agg.avgGpuTemp * 9 / 5 + 32)}°F / ${Math.round(agg.avgGpuTemp)}°C`
+                : `${Math.round(agg.avgGpuTemp)}°C / ${Math.round(agg.avgGpuTemp * 9 / 5 + 32)}°F`
+          }
         />
         <Field
           label="Avg GPU"
