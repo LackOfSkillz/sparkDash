@@ -112,6 +112,17 @@ export function ClusterSummary({
             Active
           </span>
         )}
+        {/* Partial coverage rides in the identity row, which already has this height. It used
+            to be a paragraph below the aggregates, and that extra line was what pushed the
+            overview past one viewport at exactly the moment a node stopped reporting. */}
+        {partial && (
+          <span
+            className="rounded bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-warning"
+            title={`Aggregates cover ${agg.reporting} of ${agg.expected} nodes — a node is not reporting, so totals are partial rather than cluster-wide.`}
+          >
+            Partial
+          </span>
+        )}
         <span className="ml-auto text-[13px] text-muted">
           {onlineCount}/{sparks.length} nodes online
         </span>
@@ -203,12 +214,6 @@ export function ClusterSummary({
         />
       </div>
 
-      {partial && (
-        <p className="mt-2.5 text-[12px] text-muted">
-          Aggregates cover {agg.reporting} of {agg.expected} nodes — a node is not reporting, so
-          totals are partial rather than cluster-wide.
-        </p>
-      )}
     </div>
   );
 }

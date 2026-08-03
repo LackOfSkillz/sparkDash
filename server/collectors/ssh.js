@@ -10,6 +10,7 @@ import fs from "fs";
 import { SSH_CONNECT_TIMEOUT } from "../config.js";
 import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
+import { enqueueSshCommand } from "./sshBatch.js";
 
 /**
  * Build the minimal environment handed to the ssh/sshpass child.
@@ -89,14 +90,39 @@ function sshpassAvailable() {
 }
 
 /**
- * Execute a command on a remote Spark via SSH.
+ * Execute a command on a remote Spark via SSH, coalescing with other commands for the same
+ * host that were issued in the same window.
+ *
+ * Callers see no difference — one command in, that command's stdout out. Underneath, the
+ * six metric domains and the liveness probe now share a single connection per cycle instead
+ * of opening one each. See sshBatch.js for why that matters on this deployment.
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, noBatch?: boolean }} [options]
  * @returns {Promise<string>} - Trimmed stdout
  */
 export async function sshExec(spark, cmd, options = {}) {
+  if (options.noBatch) return sshExecDirect(spark, cmd, options);
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
+  const { host, user } = spark.ssh || {};
+  const key = `${user || ""}@${host || spark.lanIp || ""}`;
+  return enqueueSshCommand(key, cmd, timeoutMs, (script, batchTimeout) =>
+    sshExecDirect(spark, script, { timeoutMs: batchTimeout })
+  );
+}
+
+/**
+ * Execute exactly one command over its own SSH connection, bypassing coalescing.
+ * Used by the batcher itself, and available to callers that must not be merged.
+ *
+ * @param {Object} spark - Spark config object
+ * @param {string} cmd - Command to execute
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<string>} - Trimmed stdout
+ */
+export async function sshExecDirect(spark, cmd, options = {}) {
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
   const { host, user, auth, password } = spark.ssh || {};

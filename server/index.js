@@ -19,6 +19,7 @@ import {
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { launchSshShell } from "./sshShell.js";
+import { sshBatchStats } from "./collectors/sshBatch.js";
 
 dotenv.config();
 
@@ -275,7 +276,8 @@ app.put("/api/settings", (req, res) => {
 app.get("/api/sparks/:id/metrics", (req, res) => {
   const monitor = monitors.get(req.params.id);
   if (!monitor) return res.status(404).json({ error: "Spark not found" });
-  res.json(monitor.snapshot());
+  // Request/response, not the deduplicated broadcast, so the volatile freshness fields are safe.
+  res.json(monitor.snapshot({ includeVolatile: true }));
 });
 
 // Test SSH + LLM connectivity for a registered Spark.
@@ -1092,6 +1094,14 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
 // ─── Static files (built frontend) ───────────────────────
 const distDir = path.join(ROOT, "dist");
 const indexHtml = path.join(distDir, "index.html");
+/** Diagnostic counters, for the stability watcher and for support. No credentials included. */
+app.get("/api/diagnostics/liveness", (_req, res) => {
+  res.json({
+    nodes: [...monitors.values()].map((m) => m.livenessDiagnostics()),
+    ssh: sshBatchStats(),
+  });
+});
+
 app.use(express.static(distDir));
 
 // ─── SPA fallback (Express v5 wildcard) ───────────────────
@@ -1109,10 +1119,14 @@ app.get("*splat", (_req, res) => {
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws) => {
   console.log("[ws] client connected");
-  // Send the initial snapshot through the same path the broadcast uses so the
-  // new client benefits from the same payload format (and bufferedAmount
-  // guard, although a freshly-open socket trivially passes it).
-  broadcastPayload(buildSnapshotPayload());
+  // Send the initial snapshot to THIS client only.
+  //
+  // It used to go through broadcastPayload(), which fans out to every connected client. A
+  // single client in a reconnect loop therefore forced a re-render in every other browser
+  // once per reconnect — one flapping tab made every dashboard flash. The joining client is
+  // the only one that needs this payload; everyone else is already up to date and will get
+  // the next real change from the interval broadcast.
+  sendPayload(ws, buildSnapshotPayload());
   ws.on("close", () => {
     console.log("[ws] client disconnected");
   });
@@ -1137,23 +1151,25 @@ function buildSnapshotPayload() {
  *   buffering on slow/flaky connections (e.g. phone over spotty WiFi).
  * - Returns the payload so callers can compare against the previous broadcast.
  */
-function broadcastPayload(payload) {
-  wss.clients.forEach((client) => {
-    if (client.readyState !== 1) return; // OPEN only
-    if (client.bufferedAmount > 1_000_000) {
-      try {
-        client.close(1008, "client too slow");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
+function sendPayload(client, payload) {
+  if (client.readyState !== 1) return; // OPEN only
+  if (client.bufferedAmount > 1_000_000) {
     try {
-      client.send(payload);
+      client.close(1008, "client too slow");
     } catch {
-      /* per-client send failure — ignore, close handler will clean up */
+      /* ignore */
     }
-  });
+    return;
+  }
+  try {
+    client.send(payload);
+  } catch {
+    /* per-client send failure — ignore, close handler will clean up */
+  }
+}
+
+function broadcastPayload(payload) {
+  wss.clients.forEach((client) => sendPayload(client, payload));
 }
 
 function startBroadcast() {
@@ -1176,6 +1192,45 @@ function restartBroadcast() {
   _lastBroadcastPayload = null; // force a fresh broadcast on the new cadence
   startBroadcast();
 }
+
+// ─── Liveness diagnostics ────────────────────────────────
+// A periodic summary rather than per-probe logging: successes are the common case and would
+// bury the transitions that actually matter. Emitted only when something is worth saying —
+// a node degraded, a probe failed, or a poll was skipped because one was still in flight.
+const LIVENESS_SUMMARY_INTERVAL_MS = 60000;
+let _lastDiagKey = "";
+setInterval(() => {
+  const nodes = [...monitors.values()].map((m) => m.livenessDiagnostics());
+  if (nodes.length === 0) return;
+  const batch = sshBatchStats();
+  const interesting =
+    nodes.some((n) => n.collectorDegraded || n.consecutiveSshFailures > 0 || !n.online) ||
+    batch.batchFailures > 0;
+  // Only re-log when the picture changed, so a steady state does not repeat every minute.
+  const key = JSON.stringify([
+    nodes.map((n) => [n.id, n.online, n.sshReachable, n.collectorDegraded, n.stateTransitions]),
+    batch.batchFailures,
+  ]);
+  if (!interesting || key === _lastDiagKey) {
+    _lastDiagKey = key;
+    return;
+  }
+  _lastDiagKey = key;
+  console.log(
+    "[liveness] " +
+      nodes
+        .map(
+          (n) =>
+            `${n.id}: online=${n.online} ssh=${n.sshReachable} degraded=${n.collectorDegraded} ` +
+            `consecFail=${n.consecutiveSshFailures} ok/fail=${n.sshLivenessSuccesses}/${n.sshLivenessFailures} ` +
+            `llmSaves=${n.llmFallbackSaves} skipped=${n.pollsSkippedInFlight} transitions=${n.stateTransitions} ` +
+            `freshness=${n.metricFreshness}`
+        )
+        .join(" | ") +
+      ` || ssh batches=${batch.batches} commands=${batch.commands} coalesced=${batch.coalesced} ` +
+      `batchFailures=${batch.batchFailures} maxBatch=${batch.maxBatchSize}`
+  );
+}, LIVENESS_SUMMARY_INTERVAL_MS);
 
 // ─── Start ───────────────────────────────────────────────
 loadSettings();

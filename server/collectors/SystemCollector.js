@@ -885,7 +885,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote GPU error for ${this.spark.id}:`, err.message);
-      return this._defaultGpu();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -917,7 +921,11 @@ export class SystemCollector {
       return { usage, temperature: 0, draw: Math.round(draw * 10) / 10, tdp: Math.round(tdp) };
     } catch (err) {
       console.error(`[SystemCollector] Remote CPU error for ${this.spark.id}:`, err.message);
-      return this._defaultCpu();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -937,7 +945,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote RAM error for ${this.spark.id}:`, err.message);
-      return this._defaultRam();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -991,7 +1003,11 @@ export class SystemCollector {
       return disks;
     } catch (err) {
       console.error(`[SystemCollector] Remote Storage error for ${this.spark.id}:`, err.message);
-      return [];
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1115,7 +1131,11 @@ export class SystemCollector {
       return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac, rdma };
     } catch (err) {
       console.error(`[SystemCollector] Remote Network error for ${this.spark.id}:`, err.message);
-      return this._defaultNetwork();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1200,7 +1220,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote Unified Memory error for ${this.spark.id}:`, err.message);
-      return this._defaultUnifiedMemory();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
