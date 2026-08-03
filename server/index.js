@@ -17,6 +17,7 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import { SHOWCASE_BODY_LIMIT_BYTES } from "./collectors/showcaseLimits.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { launchSshShell } from "./sshShell.js";
 import { sshBatchStats } from "./collectors/sshBatch.js";
@@ -760,7 +761,12 @@ app.delete("/api/sparks/:id/llm/bench/:benchId", (req, res) => {
  * Returns 202 { sessionId }; poll GET for deltas; DELETE :sessionId to cancel.
  * Finished runs are archived; GET collection lists history; DELETE collection clears it.
  */
-app.post("/api/sparks/:id/llm/showcase", (req, res) => {
+// Showcase start carries whole prompt packets. The global 100 kb express.json()
+// default rejected those as a bare 413 before any Showcase validation ran, so
+// the caller learned nothing about which limit they hit. This larger parser is
+// mounted on this route only; the authoritative per-prompt and aggregate byte
+// checks still live in the manager, which returns a specific 400.
+app.post("/api/sparks/:id/llm/showcase", express.json({ limit: SHOWCASE_BODY_LIMIT_BYTES }), (req, res) => {
   const spark = registry.getSpark(req.params.id);
   if (!spark) return res.status(404).json({ error: "Spark not found" });
   if (spark.workerNode) {
@@ -808,6 +814,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
       temperature: req.body?.temperature,
       thinking: req.body?.thinking,
       promptType: req.body?.promptType,
+      raw: req.body?.raw,
       prompts: req.body?.prompts,
       apiKey: resolveLlmApiKey(spark, port),
     });

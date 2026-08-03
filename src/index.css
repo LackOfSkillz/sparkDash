@@ -1614,6 +1614,37 @@ input[type="checkbox"] {
   flex-shrink: 0;
 }
 
+/* Storage / retention surfaces. This is a development instrument, so these read
+   as diagnostics rather than product copy. */
+.showcase-page__retention-note {
+  margin-top: 0.25rem;
+  text-align: center;
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  color: var(--color-warning);
+}
+.showcase-prompt-sizes {
+  font-size: 0.6875rem;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0.4rem;
+}
+.showcase-prompt-sizes--near {
+  color: var(--color-warning);
+}
+.showcase-prompt-sizes--over {
+  color: var(--color-danger);
+}
+.showcase-prompt__bytes {
+  margin-left: 0.4rem;
+  font-size: 0.625rem;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+.showcase-history__metaonly {
+  color: var(--color-warning);
+}
+
 /* Big centered model identity — sits above metrics strip */
 .showcase-model-header {
   flex-shrink: 0;

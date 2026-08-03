@@ -470,13 +470,55 @@ export interface ShowcaseStartRequest {
   thinking?: boolean;
   /** Catalog mode used to seed prompts (structural / text / mixed). */
   promptType?: ShowcasePromptType | null;
+  /**
+   * Development mode: send prompts exactly as entered and allow natural
+   * stopping. Suppresses the server-side fill-to-maximum suffix and the
+   * forced-generation fields (min_tokens / ignore_eos / stop). Defaults to
+   * false so the existing throughput demo is unchanged.
+   */
+  raw?: boolean;
   prompts: string[];
+}
+
+/**
+ * Identity of one prompt before and after Showcase's own mutation.
+ * SHA-256 proves BYTE IDENTITY only — never semantic equivalence, model
+ * determinism, or provider cache use.
+ */
+export interface ShowcasePromptIdentity {
+  /** Hash of exactly what the caller sent. */
+  submittedHash: string;
+  submittedByteLength: number;
+  /** Hash of what was actually sent to the model. Equal to submitted in raw mode. */
+  effectiveHash: string;
+  effectiveByteLength: number;
+  /** True when Showcase altered the prompt (non-raw fill suffix). */
+  mutated: boolean;
+}
+
+/** Measured UTF-8 body size of an archived run. */
+export interface ShowcaseBodyAccounting {
+  promptBytes: number;
+  contentBytes: number;
+  reasoningBytes: number;
+  totalBodyBytes: number;
+}
+
+/** Whether an archived run kept its prompt/output bodies, and why not. */
+export interface ShowcaseBodyRetention {
+  state: "full" | "metadata-only" | "unavailable";
+  reason?: string;
+  runFile?: string;
+  retainedBytes: number;
+  originalBytes: number;
+  limitBytes?: number;
 }
 
 export interface ShowcaseStreamState {
   streamId: string;
   label: string;
   prompt: string;
+  promptIdentity?: ShowcasePromptIdentity | null;
   status: "pending" | "streaming" | "completed" | "error" | "cancelled";
   contentAppend?: string;
   content?: string;
@@ -505,6 +547,8 @@ export interface ShowcaseSessionState {
   temperature?: number;
   thinking?: boolean;
   promptType?: ShowcasePromptType | null;
+  /** True when this run sent prompts unmodified and allowed natural stopping. */
+  raw?: boolean;
   startedAt?: number;
   completedAt?: number | null;
   /** Median server generation tok/s from /metrics during the run (null if unavailable). */
@@ -515,6 +559,12 @@ export interface ShowcaseSessionState {
   meanDecodeTps?: number;
   peakStreamTps?: number;
   streamCount?: number;
+  bodyAccounting?: ShowcaseBodyAccounting | null;
+  /**
+   * Present on archived runs. When state is not "full", `streams` is empty
+   * because the bodies were never retained — it is NOT an empty run.
+   */
+  bodyRetention?: ShowcaseBodyRetention | null;
   streams: ShowcaseStreamState[];
   error?: string | null;
   /** True when loaded from disk history (not a live poll session). */
@@ -532,6 +582,7 @@ export interface ShowcaseHistorySummary {
   temperature?: number;
   thinking?: boolean;
   promptType?: ShowcasePromptType | null;
+  raw?: boolean;
   startedAt?: number | null;
   completedAt?: number | null;
   serverGenerationTps?: number | null;
@@ -540,6 +591,8 @@ export interface ShowcaseHistorySummary {
   meanDecodeTps: number;
   peakStreamTps: number;
   streamCount: number;
+  bodyAccounting?: ShowcaseBodyAccounting | null;
+  bodyRetention?: ShowcaseBodyRetention | null;
   error?: string | null;
 }
 

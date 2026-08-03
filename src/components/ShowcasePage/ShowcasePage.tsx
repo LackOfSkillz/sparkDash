@@ -9,6 +9,7 @@ import {
   startShowcase,
 } from "../../api/client";
 import type {
+  ShowcaseBodyRetention,
   ShowcaseHistorySummary,
   ShowcaseSessionState,
   SparkConfig,
@@ -23,6 +24,36 @@ import {
 } from "./showcasePrompts";
 
 const POLL_MS = 300;
+/**
+ * Mirrors of the server's byte limits, for advisory display only. The server
+ * validates authoritatively; these exist so a limit is discovered before a long
+ * paste is submitted rather than after it round-trips.
+ */
+const SHOWCASE_MAX_PROMPT_BYTES = 4 * 1024 * 1024;
+const SHOWCASE_MAX_SESSION_PROMPT_BYTES = 16 * 1024 * 1024;
+
+/** UTF-8 byte length in the browser. Never `String.length`. */
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * True when an archived run's prompt/output bodies are gone — either never
+ * retained (too large) or the run file is missing. Actions that need those
+ * bodies must be disabled rather than allowed to fail or, worse, to silently
+ * load empty strings as if they were the original prompts.
+ */
+function bodiesMissing(row: { bodyRetention?: { state?: string } | null }): boolean {
+  const state = row.bodyRetention?.state;
+  return state === "metadata-only" || state === "unavailable";
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 const DEFAULT_MAX_TOKENS = 512;
 const DEFAULT_PROMPT_TYPE: ShowcasePromptType = "mixed";
 const DEFAULT_TEMPERATURE = 0.7;
@@ -195,6 +226,23 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
   const [temperature, setTemperature] = useState(DEFAULT_TEMPERATURE);
   const [thinking, setThinking] = useState(false);
+  /**
+   * Raw prompt mode (development). Off by default, so the throughput demo this
+   * page was built for behaves exactly as before.
+   */
+  const [raw, setRaw] = useState(false);
+  const promptSizes = useMemo(() => {
+    const sizes = prompts.map(utf8Bytes);
+    const total = sizes.reduce((a, b) => a + b, 0);
+    const largest = sizes.length ? Math.max(...sizes) : 0;
+    return {
+      total,
+      largest,
+      overPrompt: largest > SHOWCASE_MAX_PROMPT_BYTES,
+      overSession: total > SHOWCASE_MAX_SESSION_PROMPT_BYTES,
+      nearSession: total > SHOWCASE_MAX_SESSION_PROMPT_BYTES * 0.8,
+    };
+  }, [prompts]);
   const [configOpen, setConfigOpen] = useState(false);
   const [barVisible, setBarVisible] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -210,6 +258,9 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
   const [history, setHistory] = useState<ShowcaseHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
+  /** Retention/raw facts for the session currently on screen, when archived. */
+  const [sessionRetention, setSessionRetention] = useState<ShowcaseBodyRetention | null>(null);
+  const [sessionRaw, setSessionRaw] = useState(false);
 
   const revRef = useRef<number | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -559,8 +610,12 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
     setServerTpsMax(null);
     setAggregatePeakTps(0);
     try {
-      const trimmed = prompts.map((p) => p.trim()).filter(Boolean);
-      if (trimmed.length < MIN_TERMINALS || trimmed.length > MAX_TERMINALS) {
+      // Emptiness is judged on the trimmed form; what is SENT depends on the
+      // mode. Raw mode must ship the author's exact bytes — trimming here would
+      // silently alter the prompt before it ever left the browser, and the run
+      // would measure something that was never submitted.
+      const outgoing = prompts.filter((p) => p.trim().length > 0).map((p) => (raw ? p : p.trim()));
+      if (outgoing.length < MIN_TERMINALS || outgoing.length > MAX_TERMINALS) {
         throw new Error(`Use between ${MIN_TERMINALS} and ${MAX_TERMINALS} non-empty prompts`);
       }
       const started = await startShowcase(sparkId, {
@@ -568,10 +623,14 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         maxTokens,
         temperature,
         thinking,
+        raw,
         modelId: modelId || undefined,
         promptType,
-        prompts: trimmed,
+        prompts: outgoing,
       });
+      // A fresh run starts live: bodies are in memory, nothing is archived yet.
+      setSessionRetention(null);
+      setSessionRaw(raw);
       sessionIdRef.current = started.sessionId;
       setSessionId(started.sessionId);
       setSessionStatus("running");
@@ -595,6 +654,7 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
     maxTokens,
     temperature,
     thinking,
+    raw,
     modelId,
     promptType,
     pollOnce,
@@ -617,6 +677,11 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         if (data.maxTokens != null) setMaxTokens(data.maxTokens);
         if (data.temperature != null) setTemperature(data.temperature);
         if (typeof data.thinking === "boolean") setThinking(data.thinking);
+        // A reused raw run must stay raw — restoring it as a demo run would
+        // re-mutate the prompts the run existed to test unmodified.
+        if (typeof data.raw === "boolean") setRaw(data.raw);
+        setSessionRaw(data.raw === true);
+        setSessionRetention(data.bodyRetention ?? null);
         if (
           data.promptType === "text" ||
           data.promptType === "structural" ||
@@ -648,6 +713,7 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
       if (row.maxTokens != null) setMaxTokens(row.maxTokens);
       if (row.temperature != null) setTemperature(row.temperature);
       if (typeof row.thinking === "boolean") setThinking(row.thinking);
+      if (typeof row.raw === "boolean") setRaw(row.raw);
       if (row.modelId) setModelId(row.modelId);
       if (
         row.promptType === "text" ||
@@ -932,6 +998,23 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
                   <span>Thinking</span>
                 </label>
               </div>
+              <div className="showcase-field">
+                <span className="showcase-field__label showcase-field__label--spacer" aria-hidden="true">
+                  &nbsp;
+                </span>
+                <label
+                  className="showcase-check"
+                  title="Sends prompts exactly as entered and allows natural stopping. Disables Showcase's fill-to-maximum prompt suffix and forced-generation fields."
+                >
+                  <input
+                    type="checkbox"
+                    checked={raw}
+                    disabled={controlsLocked}
+                    onChange={(e) => setRaw(e.target.checked)}
+                  />
+                  <span>Raw prompt mode</span>
+                </label>
+              </div>
             </fieldset>
             <div className="showcase-field">
               <span className="showcase-field__label showcase-field__label--spacer" aria-hidden="true">
@@ -1061,12 +1144,24 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
                           {row.promptType ? (
                             <span>· {row.promptType}</span>
                           ) : null}
+                          {row.raw ? <span>· raw</span> : null}
                           {row.meanDecodeTps > 0 && (
                             <span>· avg {row.meanDecodeTps.toFixed(0)} tok/s</span>
                           )}
                           {row.totalTokens > 0 && (
                             <span>· {formatToks(row.totalTokens)} tok</span>
                           )}
+                          {row.bodyAccounting ? (
+                            <span>· in {formatBytes(row.bodyAccounting.promptBytes)}</span>
+                          ) : null}
+                          {bodiesMissing(row) ? (
+                            <span
+                              className="showcase-history__metaonly"
+                              title="Full prompt and output bodies were not retained because this run exceeded the configured history body limit."
+                            >
+                              · metadata only
+                            </span>
+                          ) : null}
                         </span>
                         {row.modelId ? (
                           <span className="showcase-history__model" title={row.modelId}>
@@ -1074,12 +1169,20 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
                           </span>
                         ) : null}
                       </button>
+                      {/* Reuse needs the archived prompt bodies. When they were
+                          not retained the action is disabled and says so, rather
+                          than loading empty strings that would look like the
+                          original prompts. */}
                       <button
                         type="button"
                         className="showcase-btn showcase-btn--ghost showcase-history__reuse"
-                        disabled={controlsLocked}
+                        disabled={controlsLocked || bodiesMissing(row)}
                         onClick={() => handleUseHistorySettings(row)}
-                        title="Load prompts & settings into the form (does not re-run)"
+                        title={
+                          bodiesMissing(row)
+                            ? "Prompt bodies were not retained for this run, so it cannot be reused."
+                            : "Load prompts & settings into the form (does not re-run)"
+                        }
                       >
                         Reuse
                       </button>
@@ -1093,9 +1196,31 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
 
         {configOpen && (
           <div className="showcase-config__prompts">
+            {/* Size is shown in UTF-8 bytes because that is what the server
+                enforces. Advisory only — the server check is authoritative, and
+                this exists so a limit is discovered before a long paste is
+                submitted rather than after. */}
+            <p
+              className={
+                promptSizes.overSession || promptSizes.overPrompt
+                  ? "showcase-prompt-sizes showcase-prompt-sizes--over"
+                  : promptSizes.nearSession
+                    ? "showcase-prompt-sizes showcase-prompt-sizes--near"
+                    : "showcase-prompt-sizes"
+              }
+            >
+              {formatBytes(promptSizes.total)} of {formatBytes(SHOWCASE_MAX_SESSION_PROMPT_BYTES)} session
+              {" · "}largest prompt {formatBytes(promptSizes.largest)} of{" "}
+              {formatBytes(SHOWCASE_MAX_PROMPT_BYTES)}
+              {promptSizes.overPrompt && " · a prompt is over the per-prompt limit"}
+              {promptSizes.overSession && " · combined prompts are over the session limit"}
+            </p>
             {prompts.map((p, i) => (
               <label key={i} className="showcase-prompt">
-                <span className="showcase-prompt__label">Prompt {i + 1}</span>
+                <span className="showcase-prompt__label">
+                  Prompt {i + 1}
+                  <span className="showcase-prompt__bytes">{formatBytes(utf8Bytes(p))}</span>
+                </span>
                 <textarea
                   value={p}
                   disabled={controlsLocked}
@@ -1235,6 +1360,22 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
           {sessionStatus}
           {sessionId ? ` · ${sessionId.slice(0, 8)}…` : ""}
           {viewingHistory ? " · read-only" : ""}
+          {sessionRaw ? " · raw prompt mode" : ""}
+          {sessionRetention
+            ? sessionRetention.state === "full"
+              ? " · history bodies: retained"
+              : " · history bodies: metadata only"
+            : ""}
+        </p>
+      )}
+      {sessionRetention && sessionRetention.state !== "full" && (
+        <p className="showcase-page__retention-note">
+          Full prompt and output bodies were not retained because this run exceeded the
+          history storage limit
+          {sessionRetention.originalBytes
+            ? ` (${formatBytes(sessionRetention.originalBytes)} of body)`
+            : ""}
+          . Hashes, byte counts, and timings are kept.
         </p>
       )}
     </div>

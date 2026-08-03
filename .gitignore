@@ -6,6 +6,7 @@ config/sparks-secrets.json
 config/.secrets-key
 config/bench-history.json
 config/showcase-history.json
+config/showcase-runs/
 config/gpu-memory.json
 config/gpu-memory.json.*
 config/bench-exports/

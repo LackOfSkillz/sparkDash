@@ -6,11 +6,18 @@
  * Live sessions use heartbeat via GET poll; auto-cancel if no touch ~5s.
  */
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { atomicWrite } from "../util/atomicWrite.js";
+import {
+  SHOWCASE_LIMITS,
+  byteLength,
+  measureSessionBody,
+  validatePromptBytes,
+} from "./showcaseLimits.js";
+import { ShowcaseRunStore } from "./showcaseRunStore.js";
 import { decodeBenchManager } from "./DecodeBench.js";
 import {
   applyThinkingFlags,
@@ -25,8 +32,16 @@ const ROOT = path.resolve(__dirname, "../..");
 const HISTORY_PATH =
   process.env.SHOWCASE_HISTORY_PATH ||
   path.join(ROOT, "config", "showcase-history.json");
-/** Keep last N finished showcases per Spark (full stream text included). */
-const HISTORY_LIMIT = 20;
+/**
+ * Per-run body files live beside the index, in their own directory.
+ * The index holds summaries and byte counts; bodies live here, one file per run,
+ * and only when the run fits the archive budget.
+ */
+const RUNS_DIR =
+  process.env.SHOWCASE_RUNS_DIR ||
+  path.join(path.dirname(HISTORY_PATH), "showcase-runs");
+/** Retained runs per Spark. */
+const HISTORY_LIMIT = SHOWCASE_LIMITS.historyLimit;
 
 const DEFAULT_MAX_TOKENS = 512;
 const MIN_MAX_TOKENS = 64;
@@ -35,9 +50,13 @@ const DEFAULT_TEMPERATURE = 0.7;
 const MIN_TEMPERATURE = 0;
 const MAX_TEMPERATURE = 2;
 const MIN_PROMPTS = 1;
-const MAX_PROMPTS = 32;
+const MAX_PROMPTS = SHOWCASE_LIMITS.maxPrompts;
+/**
+ * Prompt size is enforced in UTF-8 BYTES by showcaseLimits, not in characters.
+ * A prompt must still carry at least one non-whitespace character; that is a
+ * "did you actually send something" check, not a size limit.
+ */
 const MIN_PROMPT_LEN = 1;
-const MAX_PROMPT_LEN = 4000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_CHECK_MS = 1_000;
 /** Full max_tokens fills at low tok/s need a longer per-stream budget than decode bench. */
@@ -55,9 +74,41 @@ function contentCap(maxTokens) {
 
 const PROMPT_TYPES = new Set(["structural", "text", "mixed"]);
 
-/** Suffix appended server-side; keep under MAX_PROMPT_LEN headroom in UI catalogs. */
+/** Suffix appended server-side in NON-raw mode. Never appended in raw mode. */
 const FILL_TO_MAX_SUFFIX =
   " Continue generating until you hit the maximum output length; do not stop early—keep expanding with more content.";
+
+/**
+ * SHA-256 of the exact UTF-8 bytes, lowercase hex.
+ *
+ * Proves BYTE IDENTITY and nothing else. It is not evidence of semantic
+ * equivalence, model determinism, or that a provider served anything from a
+ * cache. It answers exactly one question: are these the same bytes?
+ */
+export function hashPromptBytes(text) {
+  return createHash("sha256").update(String(text ?? ""), "utf8").digest("hex");
+}
+
+/**
+ * Identity of one prompt, before and after Showcase's own mutation.
+ *
+ * Non-raw mode appends the fill-to-maximum suffix server-side, so what the model
+ * received is not what the caller typed. Recording only one hash would make the
+ * run irreproducible from its own record: you could not tell whether a
+ * difference came from your edit or from the server's. Two hashes, and a flag
+ * that says plainly whether they diverged.
+ */
+export function buildPromptIdentity(submitted, effective) {
+  const submittedHash = hashPromptBytes(submitted);
+  const effectiveHash = submitted === effective ? submittedHash : hashPromptBytes(effective);
+  return {
+    submittedHash,
+    submittedByteLength: byteLength(submitted),
+    effectiveHash,
+    effectiveByteLength: byteLength(effective),
+    mutated: submitted !== effective,
+  };
+}
 
 /**
  * Encourage full-length completions when the prompt doesn't already ask for it.
@@ -108,6 +159,7 @@ function publicSessionRecord(session, opts = {}) {
     streamId: s.streamId,
     label: s.label,
     prompt: s.prompt,
+    promptIdentity: s.promptIdentity ?? null,
     status: s.status,
     content: s.content || "",
     reasoning: s.reasoning || "",
@@ -144,6 +196,7 @@ function publicSessionRecord(session, opts = {}) {
     temperature: session.temperature ?? DEFAULT_TEMPERATURE,
     thinking: session.thinking !== false,
     promptType: session.promptType ?? null,
+    raw: session.raw === true,
     startedAt: session.startedAt ?? null,
     completedAt: session.completedAt ?? null,
     serverGenerationTps: session.serverGenerationTps ?? null,
@@ -153,9 +206,61 @@ function publicSessionRecord(session, opts = {}) {
     meanDecodeTps,
     peakStreamTps,
     streamCount: streams.length,
+    bodyAccounting: measureSessionBody(streams),
     streams,
     error: session.error ?? null,
     fromHistory: Boolean(opts.fromHistory || session.fromHistory),
+  };
+}
+
+/**
+ * The index entry for one archived run: everything EXCEPT the bodies.
+ *
+ * This is what makes the index cheap. Per stream it keeps identity, status, and
+ * sizes — enough to tell two runs apart, verify a prompt, and audit storage —
+ * and drops `prompt`, `content`, and `reasoning`, which are the only fields that
+ * scale with the manuscript. Bodies live in one place: the run file, or nowhere.
+ */
+function historyIndexRecord(record, bodyRetention) {
+  return {
+    sessionId: record.sessionId,
+    sparkId: record.sparkId,
+    status: record.status,
+    port: record.port,
+    modelId: record.modelId ?? null,
+    maxTokens: record.maxTokens ?? null,
+    temperature: record.temperature ?? DEFAULT_TEMPERATURE,
+    thinking: record.thinking !== false,
+    promptType: record.promptType ?? null,
+    raw: record.raw === true,
+    startedAt: record.startedAt ?? null,
+    completedAt: record.completedAt ?? null,
+    serverGenerationTps: record.serverGenerationTps ?? null,
+    serverGenerationTpsMax: record.serverGenerationTpsMax ?? null,
+    serverGenerationSamples: record.serverGenerationSamples ?? 0,
+    totalTokens: record.totalTokens ?? 0,
+    meanDecodeTps: record.meanDecodeTps ?? 0,
+    peakStreamTps: record.peakStreamTps ?? 0,
+    streamCount: record.streamCount ?? record.streams?.length ?? 0,
+    bodyAccounting: record.bodyAccounting ?? measureSessionBody(record.streams),
+    bodyRetention,
+    streamMeta: (record.streams || []).map((s) => ({
+      streamId: s.streamId,
+      label: s.label,
+      status: s.status,
+      promptIdentity: s.promptIdentity ?? null,
+      promptByteLength: byteLength(s.prompt),
+      contentByteLength: byteLength(s.content),
+      reasoningByteLength: byteLength(s.reasoning),
+      tokenCount: s.tokenCount || 0,
+      ttftMs: s.ttftMs ?? null,
+      decodeTps: s.decodeTps || 0,
+      peakTokPerSec: s.peakTokPerSec || 0,
+      model: s.model ?? null,
+      error: s.error ?? null,
+    })),
+    error: record.error ?? null,
+    fromHistory: true,
   };
 }
 
@@ -179,19 +284,23 @@ function historySummary(record) {
     meanDecodeTps: record.meanDecodeTps ?? 0,
     peakStreamTps: record.peakStreamTps ?? 0,
     streamCount: record.streamCount ?? record.streams?.length ?? 0,
+    raw: record.raw === true,
+    bodyAccounting: record.bodyAccounting ?? null,
+    bodyRetention: record.bodyRetention ?? null,
     error: record.error ?? null,
   };
 }
 
 export class ShowcaseManager {
-  constructor(historyPath = HISTORY_PATH) {
+  constructor(historyPath = HISTORY_PATH, runsDir = RUNS_DIR) {
     /** @type {Map<string, object>} sessionId → live session */
     this.sessions = new Map();
     /** @type {Map<string, string>} sparkId → active sessionId */
     this.activeBySpark = new Map();
-    /** @type {Map<string, object[]>} sparkId → archived records (newest first) */
+    /** @type {Map<string, object[]>} sparkId → archived INDEX records (no bodies) */
     this.historyBySpark = new Map();
     this.historyPath = historyPath;
+    this.runStore = new ShowcaseRunStore(runsDir);
     /** @type {ReturnType<typeof setInterval> | null} */
     this._heartbeatTimer = null;
     this._loadHistory();
@@ -204,21 +313,66 @@ export class ShowcaseManager {
       const raw = fs.readFileSync(this.historyPath, "utf8");
       const data = JSON.parse(raw);
       if (!data || typeof data !== "object") return;
+      let migrated = 0;
       for (const [sparkId, list] of Object.entries(data)) {
         if (!Array.isArray(list)) continue;
         const cleaned = list
           .filter((r) => r && typeof r === "object" && r.sessionId && r.sparkId)
           .slice(0, HISTORY_LIMIT)
-          .map((r) => ({
-            ...r,
-            status: r.status === "running" ? "cancelled" : r.status || "completed",
-            fromHistory: true,
-          }));
+          .map((r) => {
+            const record = {
+              ...r,
+              status: r.status === "running" ? "cancelled" : r.status || "completed",
+              fromHistory: true,
+            };
+            // Legacy index written before bodies moved out: it carries full
+            // stream text inline. Migrate it to a run file (or to metadata-only
+            // if it is too large) so the index stops growing with manuscripts.
+            // Nothing is silently discarded — a run too big to keep is recorded
+            // as metadata-only with its original size.
+            if (Array.isArray(record.streams) && record.streams.length > 0) {
+              migrated++;
+              return this._migrateLegacyRecord(record);
+            }
+            return record;
+          });
         if (cleaned.length) this.historyBySpark.set(sparkId, cleaned);
+      }
+      if (migrated > 0) {
+        // Deliberately NOT saved here. This module creates its singleton at
+        // import time, so writing during construction would mean importing the
+        // file — in a test, a script, or a tool — mutated the real config
+        // directory as a side effect. The converted records live in memory and
+        // the index is rewritten on the next archive or clear.
+        console.warn(
+          `[Showcase] ${migrated} legacy history record(s) carry inline bodies; ` +
+            `they will move out of the index on the next archive`
+        );
       }
     } catch (err) {
       console.warn("[Showcase] failed to load history:", err?.message || err);
     }
+  }
+
+  /**
+   * Convert one legacy inline-body record to the index shape, IN MEMORY.
+   *
+   * No disk write: see the note in `_loadHistory`. The bodies stay attached to
+   * the in-memory record under `_legacyStreams` so an old run remains viewable
+   * and reusable for this process's lifetime; the on-disk index sheds them the
+   * next time it is rewritten.
+   */
+  _migrateLegacyRecord(record) {
+    const accounting = measureSessionBody(record.streams);
+    const full = { ...record, bodyAccounting: accounting, raw: record.raw === true };
+    const indexRecord = historyIndexRecord(full, {
+      state: "legacy-inline",
+      reason: "loaded-from-pre-split-index",
+      retainedBytes: accounting.totalBodyBytes,
+      originalBytes: accounting.totalBodyBytes,
+    });
+    indexRecord._legacyStreams = record.streams;
+    return indexRecord;
   }
 
   _saveHistory() {
@@ -226,7 +380,9 @@ export class ShowcaseManager {
       /** @type {Record<string, object[]>} */
       const out = {};
       for (const [sparkId, list] of this.historyBySpark.entries()) {
-        out[sparkId] = list;
+        // Strip the in-memory legacy body carrier so the written index never
+        // regains the inline prompts this split exists to remove.
+        out[sparkId] = list.map(({ _legacyStreams, ...rest }) => rest);
       }
       atomicWrite(this.historyPath, JSON.stringify(out, null, 2), 0o600);
     } catch (err) {
@@ -241,12 +397,53 @@ export class ShowcaseManager {
   _archiveSession(session) {
     if (!session || session.status === "running") return;
     const record = publicSessionRecord(session, { fromHistory: true });
+    const accounting = record.bodyAccounting;
+
+    // The archive decision, made from measured UTF-8 bytes BEFORE anything is
+    // serialized. A run whose bodies fit the budget keeps them in its own file;
+    // one that does not keeps its metadata and loses its bodies. There is no
+    // third option: truncating a prompt and presenting it as the prompt would
+    // make every later comparison a lie.
+    let bodyRetention;
+    if (accounting.totalBodyBytes <= SHOWCASE_LIMITS.maxHistoryBodyBytes) {
+      let runFile = null;
+      try {
+        runFile = this.runStore.write(session.sparkId, session.sessionId, record, atomicWrite);
+      } catch (err) {
+        console.warn("[Showcase] failed to write run body:", err?.message || err);
+      }
+      bodyRetention = runFile
+        ? { state: "full", runFile, retainedBytes: accounting.totalBodyBytes,
+            originalBytes: accounting.totalBodyBytes }
+        : { state: "metadata-only", reason: "run-file-write-failed",
+            retainedBytes: 0, originalBytes: accounting.totalBodyBytes };
+    } else {
+      // Nothing is written, and any body file left from a previous archive of
+      // this same session id is removed — the record must not claim
+      // metadata-only while a stale full body sits on disk beside it.
+      this.runStore.remove(session.sparkId, session.sessionId);
+      bodyRetention = {
+        state: "metadata-only",
+        reason: "session-body-limit",
+        retainedBytes: 0,
+        originalBytes: accounting.totalBodyBytes,
+        limitBytes: SHOWCASE_LIMITS.maxHistoryBodyBytes,
+      };
+    }
+
+    const indexRecord = historyIndexRecord(record, bodyRetention);
     const list = this.historyBySpark.get(session.sparkId) || [];
-    const next = [
-      record,
-      ...list.filter((r) => r.sessionId !== record.sessionId),
-    ].slice(0, HISTORY_LIMIT);
-    this.historyBySpark.set(session.sparkId, next);
+    const merged = [
+      indexRecord,
+      ...list.filter((r) => r.sessionId !== indexRecord.sessionId),
+    ];
+    // Runs evicted past the retention limit take their body files with them.
+    // Dropping the index entry alone would orphan the file forever, which is how
+    // a "bounded" store grows without bound.
+    for (const evicted of merged.slice(HISTORY_LIMIT)) {
+      this.runStore.remove(session.sparkId, evicted.sessionId);
+    }
+    this.historyBySpark.set(session.sparkId, merged.slice(0, HISTORY_LIMIT));
     this._saveHistory();
   }
 
@@ -262,11 +459,41 @@ export class ShowcaseManager {
   getHistorySession(sparkId, sessionId) {
     const list = this.historyBySpark.get(sparkId) || [];
     const found = list.find((r) => r.sessionId === sessionId);
-    return found ? { ...found, fromHistory: true } : null;
+    if (!found) return null;
+
+    const retention = found.bodyRetention || { state: "metadata-only" };
+    // A pre-split index still holds its bodies in memory for this process.
+    if (retention.state === "legacy-inline" && Array.isArray(found._legacyStreams)) {
+      return { ...found, streams: found._legacyStreams, fromHistory: true };
+    }
+    if (retention.state !== "full") {
+      return { ...found, streams: [], fromHistory: true };
+    }
+
+    const body = this.runStore.read(sparkId, sessionId);
+    if (!body) {
+      // The index says the bodies were kept; the file says otherwise. Report
+      // that honestly rather than returning empty strings that would read as
+      // "the run produced nothing".
+      return {
+        ...found,
+        streams: [],
+        bodyRetention: {
+          ...retention,
+          state: "unavailable",
+          reason: "run-file-missing-or-unreadable",
+        },
+        fromHistory: true,
+      };
+    }
+    return { ...found, streams: body.streams, fromHistory: true };
   }
 
   clearHistory(sparkId) {
     this.historyBySpark.delete(sparkId);
+    // Body files go with the index entries. Scoped to this Spark's own
+    // directory, so clearing one Spark never touches another's runs.
+    this.runStore.removeSpark(sparkId);
     // Drop idle live session shells for this spark
     for (const [sid, session] of this.sessions.entries()) {
       if (session.sparkId === sparkId && session.status !== "running") {
@@ -323,6 +550,7 @@ export class ShowcaseManager {
    *   temperature?: number,
    *   thinking?: boolean,
    *   promptType?: string | null,
+   *   raw?: boolean,
    *   prompts: string[],
    *   apiKey?: string | null,
    * }} opts
@@ -337,6 +565,7 @@ export class ShowcaseManager {
       temperature: rawTemp,
       thinking: rawThinking,
       promptType: rawPromptType,
+      raw: rawMode,
       prompts: rawPrompts,
       apiKey = null,
     } = opts;
@@ -352,11 +581,27 @@ export class ShowcaseManager {
       throw err;
     }
 
-    const prompts = normalizePrompts(rawPrompts);
+    // Raw mode is opt-in. Defaulting it off keeps every existing caller — the
+    // throughput demo this feature was built for — behaving exactly as before.
+    const raw = rawMode === true;
+
+    const prompts = normalizePrompts(rawPrompts, { preserveExact: raw });
     if (!prompts) {
       const err = new Error(
-        `prompts must be an array of ${MIN_PROMPTS}–${MAX_PROMPTS} strings (each ${MIN_PROMPT_LEN}–${MAX_PROMPT_LEN} chars)`
+        `prompts must be an array of ${MIN_PROMPTS}–${MAX_PROMPTS} non-empty strings`
       );
+      err.status = 400;
+      throw err;
+    }
+
+    // Size is enforced in UTF-8 bytes, per prompt AND in aggregate. The
+    // aggregate limit is the one that matters: a per-prompt ceiling alone would
+    // let 32 maximum-size prompts through, which is what the old architecture
+    // could not survive. Rejected before any session exists, so a bad request
+    // costs nothing.
+    const sizeCheck = validatePromptBytes(prompts, SHOWCASE_LIMITS);
+    if (!sizeCheck.ok) {
+      const err = new Error(sizeCheck.error);
       err.status = 400;
       throw err;
     }
@@ -407,6 +652,13 @@ export class ShowcaseManager {
       streamId: String(i),
       label: labelFromPrompt(prompt),
       prompt,
+      // Identity of what was submitted vs what will actually be sent. In raw
+      // mode these are the same; in non-raw the fill suffix makes them differ,
+      // and the record says so rather than leaving it to be inferred.
+      promptIdentity: buildPromptIdentity(
+        prompt,
+        raw ? prompt : withFillToMaxInstruction(prompt)
+      ),
       status: "pending",
       /** Answer text (delta.content) */
       content: "",
@@ -439,6 +691,7 @@ export class ShowcaseManager {
       temperature,
       thinking,
       promptType,
+      raw,
       startedAt: now,
       completedAt: null,
       streams,
@@ -703,23 +956,38 @@ export class ShowcaseManager {
       if (session._abort.signal.aborted) ctrl.abort();
       else session._abort.signal.addEventListener("abort", onParentAbort, { once: true });
 
-      const body = {
-        model: session.modelId || undefined,
-        messages: [
-          {
-            role: "user",
-            content: withFillToMaxInstruction(stream.prompt),
-          },
-        ],
-        max_tokens: session.maxTokens,
-        // Prefer full-length generations when the backend supports it (vLLM).
-        min_tokens: session.maxTokens,
-        ignore_eos: true,
-        stop: [],
-        temperature: session.temperature,
-        stream: true,
-        stream_options: { include_usage: true },
-      };
+      // Raw mode sends the prompt exactly as supplied and lets the model stop
+      // when it is finished. The demo path does the opposite on purpose — fill
+      // suffix, min_tokens == max_tokens, ignore_eos — which produces a good
+      // wall of moving text and a completion the model was forbidden to end.
+      // That is fine for a throughput demo and useless for studying prompts, so
+      // the two modes are separated rather than compromised between.
+      const body = session.raw
+        ? {
+            model: session.modelId || undefined,
+            messages: [{ role: "user", content: stream.prompt }],
+            max_tokens: session.maxTokens, // a ceiling, not a target
+            temperature: session.temperature,
+            stream: true,
+            stream_options: { include_usage: true },
+          }
+        : {
+            model: session.modelId || undefined,
+            messages: [
+              {
+                role: "user",
+                content: withFillToMaxInstruction(stream.prompt),
+              },
+            ],
+            max_tokens: session.maxTokens,
+            // Prefer full-length generations when the backend supports it (vLLM).
+            min_tokens: session.maxTokens,
+            ignore_eos: true,
+            stop: [],
+            temperature: session.temperature,
+            stream: true,
+            stream_options: { include_usage: true },
+          };
       applyThinkingFlags(body, session.modelId, session.thinking !== false);
 
       stream.status = "streaming";
@@ -883,16 +1151,22 @@ export class ShowcaseManager {
  * @param {unknown} raw
  * @returns {string[] | null}
  */
-function normalizePrompts(raw) {
+function normalizePrompts(raw, { preserveExact = false } = {}) {
   if (!Array.isArray(raw)) return null;
   if (raw.length < MIN_PROMPTS || raw.length > MAX_PROMPTS) return null;
   /** @type {string[]} */
   const out = [];
   for (const p of raw) {
     if (typeof p !== "string") return null;
-    const t = p.trim();
-    if (t.length < MIN_PROMPT_LEN || t.length > MAX_PROMPT_LEN) return null;
-    out.push(t);
+    // Emptiness is judged on the trimmed form either way — "did you send
+    // anything" is a different question from "what exactly did you send".
+    if (p.trim().length < MIN_PROMPT_LEN) return null;
+    // Raw mode keeps the caller's exact bytes. Leading indentation, trailing
+    // newlines, and CRLF are part of a real prompt: they change the tokens the
+    // model sees, and silently trimming them would mean the run measured
+    // something the caller never sent. Non-raw keeps the historical trim so
+    // existing Showcase behavior is unchanged.
+    out.push(preserveExact ? p : p.trim());
   }
   return out;
 }
@@ -910,4 +1184,7 @@ export const SHOWCASE_DEFAULTS = {
   maxPrompts: MAX_PROMPTS,
   heartbeatTimeoutMs: HEARTBEAT_TIMEOUT_MS,
   historyLimit: HISTORY_LIMIT,
+  maxPromptBytes: SHOWCASE_LIMITS.maxPromptBytes,
+  maxSessionPromptBytes: SHOWCASE_LIMITS.maxSessionPromptBytes,
+  maxHistoryBodyBytes: SHOWCASE_LIMITS.maxHistoryBodyBytes,
 };
