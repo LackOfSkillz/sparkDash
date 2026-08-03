@@ -768,6 +768,10 @@ export class ShowcaseManager {
         streamId: s.streamId,
         label: s.label,
         prompt: s.prompt,
+        // Static for the life of the stream, and small. Sent on every poll
+        // rather than only in a full snapshot so a client that joined mid-run
+        // can still verify what was actually submitted.
+        promptIdentity: s.promptIdentity ?? null,
         status: s.status,
         contentLength: s.contentLength,
         reasoningLength: s.reasoningLength,
@@ -804,6 +808,11 @@ export class ShowcaseManager {
       maxTokens: session.maxTokens,
       temperature: session.temperature,
       thinking: session.thinking !== false,
+      promptType: session.promptType ?? null,
+      // The live path is what the UI polls, so raw must be visible here — not
+      // only on archived records. Without it the Raw toggle could not be
+      // restored when reopening a run that was still in memory.
+      raw: session.raw === true,
       startedAt: session.startedAt,
       completedAt: session.completedAt,
       serverGenerationTps: session.serverGenerationTps,
