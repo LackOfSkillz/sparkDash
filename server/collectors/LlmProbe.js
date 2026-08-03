@@ -76,6 +76,14 @@ export class LlmProbe {
     this.slotsTotal = 0;
     this.generationTps = 0;
     this.prefillTps = 0;
+    /** Running count from the previous poll, to spot the moment a request starts. */
+    this._prevRunning = 0;
+    /** Prompt tokens admitted but not yet paired with a TTFT observation. */
+    this._pendingPrefillTokens = 0;
+    /** Last TTFT histogram aggregate, for per-request deltas. */
+    this._lastTtftAgg = { sum: 0, count: 0 };
+    /** False until one vLLM scrape has established a counter baseline. */
+    this._vllmPrimed = false;
     this.error = null;
 
     // Per-slot rate tracking (for llama.cpp native path)
@@ -174,6 +182,10 @@ export class LlmProbe {
     this.modelPath = null;
     this.generationTps = 0;
     this.prefillTps = 0;
+    this._prevRunning = 0;
+    this._pendingPrefillTokens = 0;
+    this._lastTtftAgg = { sum: 0, count: 0 };
+    this._vllmPrimed = false;
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
@@ -493,6 +505,14 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applyVllmMetrics(txt, dtSec) {
+    // Read the running count BEFORE the token counters: the moment a request starts is what
+    const running = this._getVllmMetric(txt, "num_requests_running");
+    this.requestsRunning = running;
+    if (running != null) {
+      this.slotsActive = Math.round(running);
+      this._prevRunning = running;
+    }
+
     const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
     const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
     if (promptTokens != null && genTokens != null) {
@@ -503,13 +523,14 @@ export class LlmProbe {
       this.totalOutputTokens = genTokens;
       if (dtSec > 0 && dtSec < 10) {
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
       }
-    }
 
-    const running = this._getVllmMetric(txt, "num_requests_running");
-    this.requestsRunning = running;
-    if (running != null) this.slotsActive = Math.round(running);
+      // Prefill is NOT a per-poll rate: vLLM credits prompt_tokens_total at ADMISSION, so
+      // dividing the jump by the poll interval reported an entire prompt as if it arrived in
+      // one second (39,584 tok/s for an 80K prompt whose real rate was near 1,600, and
+      // non-zero in only 3 of 112 samples). It is derived from the TTFT aggregate below.
+      void deltaIn;
+    }
 
     if (this.gpuMemoryUtilization == null) {
       const sleepState = this._getVllmMetric(txt, "engine_sleep_state");
@@ -523,6 +544,29 @@ export class LlmProbe {
     const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
     const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
     this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
+
+    // Effective prefill rate: tokens admitted since the last observation, over the seconds
+    // those requests actually spent reaching their first token. The histogram sum grows by
+    // exactly one request's TTFT each time its count grows, so this is measured, not inferred.
+    const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
+    const ttftCount = this._getVllmMetric(txt, "time_to_first_token_seconds_count");
+    // Ratio of the two lifetime aggregates: every prompt token the server has admitted over
+    // every second it has spent reaching a first token. An average, and labelled as one.
+    //
+    // Windowed pairing was tried and abandoned. Tokens are credited at admission while TTFT is
+    // recorded at first token, so the two land in different polls and cannot be matched
+    // reliably: a request that never produces a first token — the empty-completion fault seen
+    // on this cluster — adds tokens that no TTFT observation will ever pair with, and they
+    // then corrupt every later reading. Measured 15,102 / 115,087 / 185,797 tok/s against a
+    // client-measured 326 / ~1,900 / 17,597.
+    //
+    // The ratio of totals cannot drift that way: an unpaired request perturbs it by its own
+    // share and nothing accumulates. It moves slowly, which is honest — it is an average over
+    // the server's lifetime, not a live rate.
+    if (ttftSum != null && ttftSum > 0 && promptTokens != null && promptTokens > 0) {
+      this.prefillTps = Math.max(0, Math.round((promptTokens / ttftSum) * 100) / 100);
+    }
+    this._vllmPrimed = true;
 
     const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
     const e2eP95 = this._histogramQuantile(e2eHist.buckets, e2eHist.total, 0.95);
