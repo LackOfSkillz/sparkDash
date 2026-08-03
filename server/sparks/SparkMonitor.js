@@ -4,6 +4,14 @@ import { SystemCollector } from "../collectors/SystemCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { sshTest, sshExec } from "../collectors/ssh.js";
 import {
+  applyLivenessObservation,
+  createLivenessState,
+  metricFreshness,
+  shouldRetainMetrics,
+  LIVENESS_FAILURE_THRESHOLD,
+  OFFLINE_GRACE_MS,
+} from "./nodeLiveness.js";
+import {
   POLL_INTERVAL_GPU,
   POLL_INTERVAL_CPU,
   POLL_INTERVAL_NETWORK,
@@ -15,7 +23,12 @@ import {
   HOST_PATHS,
 } from "../config.js";
 
-const ONLINE_GRACE_MS = 10000;
+/**
+ * How recently the model endpoint must have answered for it to count as evidence that a head
+ * node is alive. Without this a stale `available: true` from a probe that stopped running
+ * could hold a genuinely dead node online forever.
+ */
+const LLM_EVIDENCE_MAX_AGE_MS = 15000;
 
 /**
  * SparkMonitor — one per Spark. Owns collectors + rate state + poll loop.
@@ -39,9 +52,13 @@ export class SparkMonitor {
       }
     }
 
-    // Online status from dedicated liveness checks (not metric poll success)
-    this.online = false;
-    this.lastOnlineOk = 0;
+    // Liveness lives in its own state machine so the policy is testable without a network.
+    // `online` and `lastOnlineOk` remain as accessors for compatibility with existing callers.
+    this._liveness = createLivenessState();
+    /** Last time an LLM probe reported the endpoint available, epoch ms. */
+    this._lastLlmOkAt = 0;
+    /** Per-domain epoch ms of the last SUCCESSFUL collection, for freshness reporting. */
+    this._lastSuccessAt = {};
 
     // System uptime seconds (from /proc/uptime), null when offline
     this._uptimeSeconds = null;
@@ -153,6 +170,28 @@ export class SparkMonitor {
     console.log(`[SparkMonitor] ${this.spark.id} started`);
   }
 
+  /**
+   * Diagnostic counters for this node. Exposed for logging and for the metrics endpoint —
+   * deliberately carries no host, user, key path or command text.
+   */
+  livenessDiagnostics() {
+    const c = this._liveness.counters;
+    return {
+      id: this.spark.id,
+      online: this._liveness.online,
+      sshReachable: this._liveness.sshReachable,
+      llmReachable: this._liveness.llmReachable,
+      collectorDegraded: this._liveness.collectorDegraded,
+      consecutiveSshFailures: this._liveness.consecutiveSshFailures,
+      sshLivenessSuccesses: c.sshLivenessSuccesses,
+      sshLivenessFailures: c.sshLivenessFailures,
+      llmFallbackSaves: c.llmFallbackSaves,
+      pollsSkippedInFlight: c.pollsSkippedInFlight,
+      stateTransitions: c.transitions,
+      metricFreshness: metricFreshness(this._hardwareLastSuccessAt(), Date.now()),
+    };
+  }
+
   /** Stop background polling. */
   stop() {
     this._running = false;
@@ -163,13 +202,61 @@ export class SparkMonitor {
     console.log(`[SparkMonitor] ${this.spark.id} stopped`);
   }
 
-  /** Return a full snapshot of this Spark's metrics. */
-  snapshot() {
+  /**
+   * Oldest successful hardware collection across the SSH-backed domains, which is what the
+   * displayed hardware readings actually date from. LLM is excluded: it is polled over HTTP
+   * and is unaffected by SSH trouble.
+   */
+  _hardwareLastSuccessAt() {
+    const domains = ["gpu", "cpu", "ram", "network", "storage", "memory"];
+    const times = domains.map((d) => this._lastSuccessAt[d]).filter((t) => typeof t === "number" && t > 0);
+    return times.length ? Math.min(...times) : 0;
+  }
+
+  /**
+   * Return a full snapshot of this Spark's metrics.
+   *
+   * `includeVolatile` adds fields that change on every call (a millisecond age, an epoch of
+   * the last collection). They are OFF by default and must stay off for the broadcast path:
+   * that path skips sending when a snapshot's JSON is byte-identical to the previous one, and
+   * a continuously-changing field defeats the comparison, forcing a broadcast and a full
+   * frontend re-render every tick even when nothing measured has moved. Ask for them on
+   * request/response endpoints, which are not deduplicated.
+   *
+   * @param {{ includeVolatile?: boolean }} [options]
+   */
+  snapshot(options = {}) {
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
+    const now = Date.now();
+    const lastSuccess = this._hardwareLastSuccessAt();
+    const freshness = metricFreshness(lastSuccess, now);
+    const retain = shouldRetainMetrics(this._liveness.online, freshness);
+    const blank = {
+      gpu: this.collector._defaultGpu(),
+      cpu: this.collector._defaultCpu(),
+      ram: this.collector._defaultRam(),
+      storage: [],
+      network: this.collector._defaultNetwork(),
+      unifiedMemory: this.collector._defaultUnifiedMemory(),
+    };
     return {
       id: this.spark.id,
       name: this.spark.name,
       online: this.online,
+      // Reachability split three ways so the UI can tell "host is gone" from "collector is
+      // struggling". The overview does not render these yet; they exist so it can.
+      sshReachable: this._liveness.sshReachable,
+      llmReachable: this._liveness.llmReachable,
+      collectorDegraded: this._liveness.collectorDegraded,
+      // Banded, so it only changes when the band changes — safe for the deduplicated
+      // broadcast. The raw age and timestamp are volatile and opt-in.
+      metricFreshness: freshness,
+      ...(options.includeVolatile
+        ? {
+            lastSuccessfulCollectionAt: lastSuccess || null,
+            metricAgeMs: lastSuccess ? now - lastSuccess : null,
+          }
+        : {}),
       uptime: this._uptimeSeconds,
       disabledDevices: this.spark.disabledDevices || [],
       disabledInterfaces: this.spark.disabledInterfaces || [],
@@ -195,12 +282,16 @@ export class SparkMonitor {
         // measured values are unchanged. The frontend does not consume a
         // metrics timestamp; the WS receive time can serve if one is ever
         // needed.
-        gpu: this._metrics.gpu,
-        cpu: this._metrics.cpu,
-        ram: this._metrics.ram,
-        storage: this._metrics.storage,
-        network: this._metrics.network,
-        unifiedMemory: this._metrics.unifiedMemory,
+        // Retained while the node is believed up, however stale: the last real reading with
+        // an age attached beats blanking a working cluster because one probe timed out. Once
+        // a node is genuinely offline AND its readings have expired, they are dropped rather
+        // than left on screen looking current.
+        gpu: retain ? this._metrics.gpu : blank.gpu,
+        cpu: retain ? this._metrics.cpu : blank.cpu,
+        ram: retain ? this._metrics.ram : blank.ram,
+        storage: retain ? this._metrics.storage : blank.storage,
+        network: retain ? this._metrics.network : blank.network,
+        unifiedMemory: retain ? this._metrics.unifiedMemory : blank.unifiedMemory,
         llm: this._metrics.llm,
       },
     };
@@ -222,38 +313,85 @@ export class SparkMonitor {
   }
 
   // ─── Liveness ─────────────────────────────────────────────
+  /** Current online verdict. Backed by the liveness state machine. */
+  get online() {
+    return this._liveness.online;
+  }
+  set online(v) {
+    this._liveness.online = Boolean(v);
+  }
+  /** Epoch ms of the last successful SSH liveness probe. */
+  get lastOnlineOk() {
+    return this._liveness.lastSshOkAt;
+  }
+  set lastOnlineOk(v) {
+    this._liveness.lastSshOkAt = Number(v) || 0;
+  }
+
+  /**
+   * Is a head node's model endpoint answering right now?
+   * Workers are excluded on purpose: a worker hosts no endpoint, so silence there is not
+   * evidence of anything. Stale evidence is rejected via LLM_EVIDENCE_MAX_AGE_MS.
+   */
+  _llmEvidence(now) {
+    const eligible = this._llmMonitoringEnabled() && !this.spark.workerNode;
+    if (!eligible) return { eligible: false, ok: null };
+    const fresh = this._lastLlmOkAt > 0 && now - this._lastLlmOkAt <= LLM_EVIDENCE_MAX_AGE_MS;
+    return { eligible: true, ok: fresh };
+  }
+
   async _checkOnline() {
-    if (!this._running || this._inflight.online) return;
+    if (!this._running || this._inflight.online) {
+      if (this._inflight.online) this._liveness.counters.pollsSkippedInFlight++;
+      return;
+    }
     this._inflight.online = true;
+    let sshOk = false;
     try {
       if (this.spark.isLocal) {
         await this.collector.pingHost();
+        sshOk = true;
       } else {
         const result = await sshTest(this.spark);
-        // Re-check after the (up to 10s) SSH await — `stop()` may have fired
-        // mid-flight (removeSpark / updateSpark). Bail before mutating state or
-        // running into a stopped registry entry.
+        // Re-check after the SSH await — `stop()` may have fired mid-flight
+        // (removeSpark / updateSpark). Bail before mutating state.
         if (!this._running) return;
-        if (!result.ok) throw new Error(result.message);
+        sshOk = Boolean(result.ok);
       }
-      if (!this._running) return;
-      this.online = true;
-      this.lastOnlineOk = Date.now();
+    } catch {
+      sshOk = false;
+    } finally {
+      this._inflight.online = false;
+    }
+    if (!this._running) return;
 
-      // Collect system uptime
+    const now = Date.now();
+    const llm = this._llmEvidence(now);
+    const verdict = applyLivenessObservation(this._liveness, {
+      sshOk,
+      llmOk: llm.ok,
+      llmEligible: llm.eligible,
+      now,
+    });
+
+    if (verdict.changed) {
+      // Transitions only — a per-probe log would bury them in normal operation.
+      console.log(
+        `[SparkMonitor] ${this.spark.id} ${verdict.from ? "online" : "offline"} -> ` +
+          `${verdict.to ? "online" : "offline"} (${verdict.reason}; ` +
+          `consecutiveSshFailures=${this._liveness.consecutiveSshFailures})`
+      );
+    }
+
+    if (sshOk) {
       try {
         this._uptimeSeconds = await this._readUptime();
       } catch {
-        // Non-fatal — uptime stays at previous value or null
+        // Non-fatal — uptime keeps its previous value rather than blanking on one timeout.
       }
-    } catch {
-      if (!this._running) return;
-      if (!this.lastOnlineOk || Date.now() - this.lastOnlineOk > ONLINE_GRACE_MS) {
-        this.online = false;
-        this._uptimeSeconds = null;
-      }
-    } finally {
-      this._inflight.online = false;
+    } else if (!this._liveness.online) {
+      // Only clear uptime once the node is actually judged offline.
+      this._uptimeSeconds = null;
     }
   }
 
@@ -339,12 +477,39 @@ export class SparkMonitor {
         case "memory":
           this._metrics.unifiedMemory = result;
           break;
-        case "llm":
-          this._metrics.llm = result;
+        case "llm": {
+          const nowMs = Date.now();
+          const anyAvailable = Array.isArray(result) && result.some((l) => l && l.available);
+          if (anyAvailable) {
+            this._metrics.llm = result;
+            this._lastLlmOkAt = nowMs;
+          } else if (
+            this._lastLlmOkAt > 0 &&
+            nowMs - this._lastLlmOkAt <= LLM_EVIDENCE_MAX_AGE_MS &&
+            Array.isArray(this._metrics.llm) &&
+            this._metrics.llm.some((l) => l && l.available)
+          ) {
+            // A probe that failed to reach the endpoint is not the endpoint reporting itself
+            // gone. Over a marginal link one timed-out probe used to blank the LLM block, and
+            // the overview keys its whole cluster layout off that — the panels unmounted and
+            // the page reflowed. Hold the last good reading briefly; if the endpoint really is
+            // down, the window lapses and the unavailable result lands as normal.
+            this._llmRetainedSince = this._llmRetainedSince ?? nowMs;
+          } else {
+            this._metrics.llm = result;
+            this._llmRetainedSince = null;
+          }
+          if (anyAvailable) this._llmRetainedSince = null;
           break;
+        }
       }
       this._lastUpdate[domain] = Date.now();
+      this._lastSuccessAt[domain] = Date.now();
     } catch (err) {
+      // Deliberately NOT clearing `_metrics[domain]`. A failed poll means we did not learn
+      // anything new, not that the hardware reported zero — blanking it here is what made a
+      // single timed-out probe look like a dead node. The value keeps its last reading and
+      // ages out through the freshness fields instead.
       console.error(`[SparkMonitor] ${this.spark.id} ${domain} poll error:`, err.message);
     } finally {
       this._inflight[domain] = false;

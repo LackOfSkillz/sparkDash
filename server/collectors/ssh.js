@@ -10,6 +10,41 @@ import fs from "fs";
 import { SSH_CONNECT_TIMEOUT } from "../config.js";
 import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
+import { enqueueSshCommand } from "./sshBatch.js";
+
+/**
+ * Build the minimal environment handed to the ssh/sshpass child.
+ *
+ * Deliberately a whitelist, not `...process.env`: spreading the parent would leak every host
+ * variable (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, …) into a process that talks to a remote host.
+ * The set below is what ssh actually needs — PATH, HOME, USER/LOGNAME (ssh logging and
+ * known_hosts mixing), TERM, and SSH_AUTH_SOCK so agent-forwarded key auth still works.
+ * SSHPASS is added by the caller, for password auth only.
+ *
+ * Windows OpenSSH needs two more entries, and omitting either is silent:
+ *   - ProgramData: ssh.exe reads its system configuration from %ProgramData%\ssh\. Without it the
+ *     process exits 255 with EMPTY stdout and stderr, so the failure surfaces only as
+ *     "Command failed: ssh ..." with no cause attached.
+ *   - HOME/USERPROFILE: Windows resolves `~` from USERPROFILE. With HOME hardcoded to the POSIX
+ *     "/root" fallback, ssh never finds ~/.ssh/config or the user's keys, so key auth cannot work.
+ *
+ * Both are forwarded only when present, so POSIX hosts are unaffected.
+ *
+ * @param {NodeJS.ProcessEnv} [parentEnv] Parent environment to derive from.
+ * @returns {Record<string, string | undefined>}
+ */
+export function buildSshChildEnv(parentEnv = process.env) {
+  return {
+    PATH: parentEnv.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    HOME: parentEnv.HOME || parentEnv.USERPROFILE || "/root",
+    USER: parentEnv.USER,
+    LOGNAME: parentEnv.LOGNAME,
+    TERM: parentEnv.TERM || "xterm",
+    ...(parentEnv.USERPROFILE ? { USERPROFILE: parentEnv.USERPROFILE } : {}),
+    ...(parentEnv.ProgramData ? { ProgramData: parentEnv.ProgramData } : {}),
+    ...(parentEnv.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: parentEnv.SSH_AUTH_SOCK } : {}),
+  };
+}
 
 // Detect sshpass without shelling out to `which` on every cold call —
 // checking PATH entries directly is faster and avoids spawning a shell.
@@ -55,14 +90,39 @@ function sshpassAvailable() {
 }
 
 /**
- * Execute a command on a remote Spark via SSH.
+ * Execute a command on a remote Spark via SSH, coalescing with other commands for the same
+ * host that were issued in the same window.
+ *
+ * Callers see no difference — one command in, that command's stdout out. Underneath, the
+ * six metric domains and the liveness probe now share a single connection per cycle instead
+ * of opening one each. See sshBatch.js for why that matters on this deployment.
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, noBatch?: boolean }} [options]
  * @returns {Promise<string>} - Trimmed stdout
  */
 export async function sshExec(spark, cmd, options = {}) {
+  if (options.noBatch) return sshExecDirect(spark, cmd, options);
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
+  const { host, user } = spark.ssh || {};
+  const key = `${user || ""}@${host || spark.lanIp || ""}`;
+  return enqueueSshCommand(key, cmd, timeoutMs, (script, batchTimeout) =>
+    sshExecDirect(spark, script, { timeoutMs: batchTimeout })
+  );
+}
+
+/**
+ * Execute exactly one command over its own SSH connection, bypassing coalescing.
+ * Used by the batcher itself, and available to callers that must not be merged.
+ *
+ * @param {Object} spark - Spark config object
+ * @param {string} cmd - Command to execute
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<string>} - Trimmed stdout
+ */
+export async function sshExecDirect(spark, cmd, options = {}) {
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
   const { host, user, auth, password } = spark.ssh || {};
@@ -97,19 +157,7 @@ export async function sshExec(spark, cmd, options = {}) {
   // when using execFile without a shell. `--` stops option parsing before destination.
   let file;
   let args;
-  // Minimal child env — only what ssh/sshpass actually need. Spreading the full
-  // `process.env` would leak every host var (AWS_*, GITHUB_TOKEN, etc.) into the
-  // child; this whitelist scopes to PATH, HOME, USER/LOGNAME (ssh logging +
-  // known_hosts mixing), TERM, and SSH_AUTH_SOCK so agent-forwarded key auth
-  // still works. SSHPASS is added below only for password auth.
-  const env = {
-    PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    HOME: process.env.HOME || "/root",
-    USER: process.env.USER,
-    LOGNAME: process.env.LOGNAME,
-    TERM: process.env.TERM || "xterm",
-    ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}),
-  };
+  const env = buildSshChildEnv();
 
   if (auth === "pass") {
     if (!password) {

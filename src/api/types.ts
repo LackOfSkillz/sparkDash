@@ -139,12 +139,46 @@ export interface NetworkInterface {
   disabled?: boolean;
 }
 
+/**
+ * One RDMA/RoCE port, read from the HCA's own sysfs counters.
+ *
+ * Deliberately separate from NetworkInterface: RDMA bypasses the kernel network stack, so
+ * these bytes and the netdev bytes measure different things and must not share a shape.
+ * A busy RoCE link shows large `txBytes` here while its netdev counters barely move.
+ */
+export interface RdmaPortMetrics {
+  /** HCA device, e.g. "rocep1s0f1". */
+  hca: string;
+  port: number;
+  /** Backing Ethernet interface, e.g. "enp1s0f1np1". null when unresolved. */
+  netdev: string | null;
+  /** IPv4 bound to the backing interface. null when unaddressed. */
+  ip: string | null;
+  /** Port state, e.g. "ACTIVE". */
+  state: string | null;
+  /** Physical state, e.g. "LinkUp". */
+  physicalState: string | null;
+  /** "Ethernet" for RoCE, "InfiniBand" for native IB. */
+  linkLayer: string | null;
+  rateGbps: number | null;
+  /** Cumulative bytes (counter words x 4). null when unreadable. */
+  txBytes: number | null;
+  rxBytes: number | null;
+  /** Live rate. null on first sample or after a counter reset — never a fabricated 0. */
+  txBytesPerSecond: number | null;
+  rxBytesPerSecond: number | null;
+  txPackets: number | null;
+  rxPackets: number | null;
+}
+
 export interface NetworkMetrics {
   primaryInterface: string | null;
   linkSpeedMbps: number | null;
   interfaces: NetworkInterface[];
   /** MAC of enP7s7 when present (same value persisted as detectedMacAddress). */
   wolMac?: string | null;
+  /** RDMA/RoCE ports. Empty on hosts without RDMA. */
+  rdma?: RdmaPortMetrics[];
 }
 
 // ─── Unified memory metrics ──────────────────────────────
@@ -174,7 +208,14 @@ export interface LlmMetrics {
   slotsActive: number;
   slotsTotal: number;
   generationTps: number;
+  /** On vLLM this is a server-lifetime average and never returns to zero. */
   prefillTps: number;
+  /**
+   * Prefill rate over a short rolling window, so it falls back to zero when nothing is
+   * prefilling. Use this wherever it sits beside generationTps; use `prefillTps` when you
+   * want the stable figure. Optional: older backend builds do not send it.
+   */
+  prefillTpsLive?: number;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
   totalOutputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */

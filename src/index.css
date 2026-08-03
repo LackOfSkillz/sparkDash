@@ -178,7 +178,9 @@
   --density-panel-title-mb: 9px;
   --density-card-pad: 14px;
   --density-card-gap: 8px;
-  --density-overview-rhythm: 16px;
+  /* Compact exists so the whole cluster fits one screen. The overview now also carries
+     interconnect state, so the rhythm between its panels is tightened to pay for it. */
+  --density-overview-rhythm: 12px;
   --density-overview-title: 24px;
   --radius-panel: 14px;
   --radius-sm: 8px;
@@ -489,7 +491,7 @@ input:disabled {
   color: var(--color-text);
 }
 
-/* ─── Logo pill (sparkDash brand) ──────────────────────── */
+/* ─── Logo pill (AetosDash brand) ──────────────────────── */
 .logo-pill {
   display: inline-flex;
   align-items: center;
@@ -1582,10 +1584,11 @@ input[type="checkbox"] {
   flex-shrink: 0;
   text-decoration: none;
 }
-.showcase-brand__bolt {
-  width: 0.9rem;
-  height: 0.9rem;
-  color: var(--color-accent);
+.showcase-brand__mark {
+  /* No color here: the brand mark is an image with its own gold, not a currentColor icon.
+     Height only — the mark is wider than it is tall, so fixing both axes would squash it. */
+  height: 20px;
+  width: auto;
   flex-shrink: 0;
 }
 

@@ -122,6 +122,18 @@ export function updateDisabledInterfaces(
   });
 }
 
+// ─── Local SSH terminal ───────────────────────────────────
+/**
+ * Ask the local server to open a terminal for one Spark.
+ *
+ * The Spark id is the entire request — no host, user, command or option is sent, because the
+ * server derives all of them from its own registry. There is deliberately no parameter here
+ * for a caller to widen later.
+ */
+export function launchSshShell(id: string): Promise<{ success: boolean; id: string; target: string }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/ssh-shell`, { method: "POST" });
+}
+
 // ─── Manual metric refresh ────────────────────────────────
 export function refreshSparkMetric(
   id: string,

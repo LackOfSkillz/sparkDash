@@ -1,10 +1,26 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
 import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { MetricBar } from "../ui/MetricBar";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ClusterSummary } from "./ClusterSummary";
+import { ClusterLlmPanel } from "./ClusterLlmPanel";
+import { SshLaunchRow } from "./SshLaunchRow";
+import {
+  activeLlm,
+  clusterInterface,
+  displayRole,
+  findHead,
+  formatUptime,
+  lanInterface,
+  clusterRdmaPort,
+  fmtRate,
+  primaryProcess,
+  rdmaHealth,
+  rootDisk,
+} from "./clusterModel";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -15,6 +31,17 @@ interface OverviewPageProps {
 
 function celsiusToFahrenheit(c: number): number {
   return Math.round(c * 9 / 5 + 32);
+}
+
+/**
+ * Both scales, always. The sensor reports Celsius; Fahrenheit is derived, so showing one and
+ * hiding the other only ever costs the reader a conversion. `temperatureUnit` still decides
+ * which is written first, so the preference setting keeps meaning something.
+ */
+function formatTemperature(celsius: number, unit: "celsius" | "fahrenheit"): string {
+  const f = celsiusToFahrenheit(celsius);
+  const c = Math.round(celsius);
+  return unit === "fahrenheit" ? `${f}°F / ${c}°C` : `${c}°C / ${f}°F`;
 }
 
 function formatMb(mb: number): string {
@@ -37,6 +64,7 @@ function MiniStat({
   bold = true,
   title,
   wrap = false,
+  span = 1,
 }: {
   label: string;
   value: string;
@@ -45,6 +73,9 @@ function MiniStat({
   title?: string;
   /** Allow value to wrap (no ellipsis trim) — used for long model ids. */
   wrap?: boolean;
+  /** Column span within the parent 4-column grid. Rows that fill only two cells donate
+   *  their unused columns rather than truncating a value that has room beside it. */
+  span?: 1 | 2 | 3;
 }) {
   const toneClass =
     tone === "danger"
@@ -57,10 +88,10 @@ function MiniStat({
             ? "text-success"
             : "text-text";
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[10px] tracking-wide text-muted">{label}</span>
+    <div className={`flex min-w-0 flex-col gap-0.5 ${span === 3 ? "col-span-3" : span === 2 ? "col-span-2" : ""}`}>
+      <span className="text-[12px] leading-none tracking-wide text-muted">{label}</span>
       <span
-        className={`font-tabular text-[13px] ${
+        className={`font-tabular text-[15px] leading-tight ${
           wrap
             ? "whitespace-normal break-words leading-snug [overflow-wrap:anywhere]"
             : "truncate"
@@ -75,11 +106,13 @@ function MiniStat({
 
 function SparkCard({
   spark,
+  allSparks,
   headSparkName,
   temperatureUnit,
   onSelect,
 }: {
   spark: SparkSnapshot;
+  allSparks: SparkSnapshot[];
   headSparkName?: string | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
@@ -90,8 +123,9 @@ function SparkCard({
 
   const usage = gpu?.usage ?? 0;
   const tempRaw = gpu?.temperature ?? 0;
+  // The bar still fills against the preferred scale; only the caption shows both.
   const displayTemp = temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(tempRaw) : tempRaw;
-  const tempLabel = temperatureUnit === "fahrenheit" ? `${displayTemp}°F` : `${displayTemp}°C`;
+  const tempLabel = formatTemperature(tempRaw, temperatureUnit);
   const vramPct = gpu?.vram?.percentage ?? um?.percentage ?? 0;
   const vramUsed = gpu?.vram?.used ?? um?.used ?? 0;
   const vramTotal = gpu?.vram?.total ?? um?.total ?? 0;
@@ -134,11 +168,14 @@ function SparkCard({
         </span>
         {(() => {
           const role = resolveSparkRole(spark);
-          const text =
-            role === "head" ? "Head" : role === "worker" ? "Worker" : "Standalone";
+          // Presentation-only: a `standalone` Spark that heads a worker reads as HEAD.
+          // Nothing persisted is rewritten — see displayRole().
+          const text = displayRole(spark, allSparks);
           const title =
-            role === "head"
-              ? "Cluster head Spark"
+            text === "HEAD"
+              ? role === "head"
+                ? "Cluster head Spark"
+                : "Serving the cluster model — persisted role is 'standalone'"
               : role === "worker"
                 ? spark.workerLabel?.trim()
                   ? `${spark.workerLabel.trim()} · distributed LLM worker`
@@ -148,21 +185,26 @@ function SparkCard({
                   : "Standalone Spark";
           return (
             <span
-              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
+              className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-accent"
               title={title}
             >
               {text}
             </span>
           );
         })()}
-        <span className="text-[10px] uppercase tracking-wide text-muted">
+        {online && spark.uptime != null && (
+          <span className="shrink-0 text-[12px] tracking-wide text-muted" title="Node uptime as reported by the node">
+            {formatUptime(spark.uptime)}
+          </span>
+        )}
+        <span className="text-[12px] uppercase tracking-wide text-muted">
           {online ? "online" : "offline"}
         </span>
       </div>
 
       {!online || !gpu ? (
         <div className="flex h-[120px] items-center justify-center">
-          <span className="text-[13px] text-muted">
+          <span className="text-[15px] text-muted">
             {online ? "Waiting for metrics…" : "Host unreachable"}
           </span>
         </div>
@@ -194,7 +236,7 @@ function SparkCard({
           </div>
 
           {/* Secondary stats */}
-          <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+          <div className="mt-3 grid grid-cols-4 gap-x-3 gap-y-2 border-t border-border pt-3">
             <MiniStat
               label="GPU Power"
               value={`${gpu?.power?.draw ?? 0}W / ${gpu?.power?.limit ?? 0}W`}
@@ -218,8 +260,10 @@ function SparkCard({
                   <MiniStat
                     label="Storage"
                     value={`${fmtStorage(rootDisk.used, false)} / ${fmtStorage(rootDisk.total, true)}`}
+                    title={`${fmtStorage(rootDisk.used, true)} used of ${fmtStorage(rootDisk.total, true)} (${rootDisk.percentage}%)`}
                     tone={rootDisk.percentage > 85 ? "danger" : rootDisk.percentage > 60 ? "warning" : "default"}
                     bold={false}
+                    wrap
                   />
                 );
               }
@@ -269,19 +313,101 @@ function SparkCard({
             })()}
           </div>
 
+          {/* CPU / RAM / connectivity / process all share one 4-column grid: the values the
+              overview gained this pass had to fit without making the card taller. */}
+          <div className="grid grid-cols-4 gap-x-3 gap-y-2 border-t border-border pt-3">
+            <MiniStat
+              label="CPU"
+              value={
+                spark.metrics.cpu
+                  ? `${Math.round(spark.metrics.cpu.usage)}%${
+                      spark.metrics.cpu.draw ? ` · ${spark.metrics.cpu.draw.toFixed(1)}W` : ""
+                    }`
+                  : "—"
+              }
+              tone={(spark.metrics.cpu?.usage ?? 0) > 85 ? "danger" : "default"}
+            />
+            <MiniStat
+              label="RAM"
+              value={
+                spark.metrics.ram
+                  ? `${fmtStorage(spark.metrics.ram.used, false)} / ${fmtStorage(spark.metrics.ram.total, true)}`
+                  : "—"
+              }
+              tone={(spark.metrics.ram?.percentage ?? 0) > 90 ? "warning" : "default"}
+              bold={false}
+              span={2}
+            />
+          </div>
+
+          {/* Connectivity — LAN for management, RoCE for the interconnect. The RoCE cell now
+              carries address, rate and link state on one line, replacing the previous
+              interface-name label rather than adding a row, so card height is unchanged. */}
           {(() => {
-            const llmArr = spark.metrics.llm;
-            const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
-            if (!llm) return null;
+            const lan = lanInterface(spark);
+            const port = clusterRdmaPort(spark);
+            const roceIface = clusterInterface(spark);
+            const health = rdmaHealth(port);
+            if (!lan && !port && !roceIface) return null;
+
+            const ip = port?.ip ?? roceIface?.ip ?? null;
+            const roceValue = port
+              ? [ip, port.rateGbps ? `${port.rateGbps} Gb/s` : null, health === "healthy" ? "Active" : (port.state ?? "—")]
+                  .filter(Boolean)
+                  .join(" · ")
+              : (ip ?? "—");
+
             return (
-              <div className="mt-3.5 border-t border-border pt-3 text-center">
-                <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                  {llm.generationTps.toFixed(0)}
-                </span>
-                <span className="text-sm font-normal text-muted"> tok/s</span>
+              <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-0">
+                <MiniStat label="LAN" value={lan?.ip ?? "—"} bold={false} title={lan?.name} />
+                <MiniStat
+                  label="RoCE"
+                  value={roceValue}
+                  span={3}
+                  tone={health === "healthy" ? "accent" : health === "degraded" ? "warning" : "default"}
+                  bold={false}
+                  title={
+                    port
+                      ? `${port.netdev ?? roceIface?.name ?? "?"} · ${port.hca} · ${port.state ?? "?"} / ${port.physicalState ?? "?"} — link state only, not NCCL or rank health`
+                      : "No RDMA device reported for this node"
+                  }
+                />
               </div>
             );
           })()}
+
+          {/* Live RDMA rate, from the HCA counters — netdev bytes stay near zero under RoCE.
+              Shares the compute-process row so no extra line is introduced. */}
+          {(() => {
+            const port = clusterRdmaPort(spark);
+            const proc = primaryProcess(spark);
+            if (!port && !proc) return null;
+            const hasRate = port && (port.txBytesPerSecond !== null || port.rxBytesPerSecond !== null);
+            return (
+              <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-0">
+                {proc ? (
+                  <MiniStat label="Compute process" value={proc} tone="accent" bold={false} span={2} />
+                ) : (
+                  <span />
+                )}
+                {port && (
+                  <MiniStat
+                    label="RDMA"
+                    span={2}
+                    value={hasRate ? `↑ ${fmtRate(port.txBytesPerSecond)}  ↓ ${fmtRate(port.rxBytesPerSecond)}` : "—"}
+                    bold={false}
+                    title={
+                      hasRate
+                        ? "From HCA hardware counters (port_xmit_data / port_rcv_data), not netdev"
+                        : "Awaiting a second counter sample — a rate needs a delta"
+                    }
+                  />
+                )}
+              </div>
+            );
+          })()}
+
+
         </>
       )}
     </div>
@@ -293,6 +419,43 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+
+  // Rolling 60-second trace of head generation tok/s for the cluster panel's sparkline.
+  // Not persisted; it resets on reload. Historical ranges are Phase 2.
+  //
+  // Sampled on a fixed 1s timer rather than on value change. Appending only when the number
+  // moved made the x-axis "distinct values seen" instead of time: a steady 40 tok/s for ten
+  // seconds contributed a single point, and once generation stopped the value sat at 0 and
+  // nothing was appended at all — so the trace never decayed and kept displaying the shape of
+  // a run that had long finished. Measured at 44 points for three requests spread over ~110
+  // seconds. A fixed cadence makes the width mean elapsed time and lets idle flatten it out.
+  const TPS_TRACE_SECONDS = 60;
+  const [tpsHistory, setTpsHistory] = useState<number[]>([]);
+  const [prefillHistory, setPrefillHistory] = useState<number[]>([]);
+  const headLlm = activeLlm(findHead(sparks));
+  const headTps = headLlm?.generationTps ?? null;
+  // The live windowed rate, not the lifetime average — the trace has to be able to reach zero.
+  const headPrefill = headLlm ? (headLlm.prefillTpsLive ?? headLlm.prefillTps) : null;
+  const headTpsRef = useRef<number | null>(null);
+  const headPrefillRef = useRef<number | null>(null);
+  headTpsRef.current = headTps;
+  headPrefillRef.current = headPrefill;
+  useEffect(() => {
+    const id = setInterval(() => {
+      // No reading yet is not the same as zero, so hold the trace until one arrives.
+      if (headTpsRef.current !== null) {
+        setTpsHistory((prev) => [...prev, headTpsRef.current ?? 0].slice(-TPS_TRACE_SECONDS));
+      }
+      // Sampled on the same tick as generation so the two traces in the header describe the
+      // same 60 seconds and can be read against each other.
+      if (headPrefillRef.current !== null) {
+        setPrefillHistory((prev) =>
+          [...prev, headPrefillRef.current ?? 0].slice(-TPS_TRACE_SECONDS),
+        );
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const onlineShutdownCount = sparks.filter((s) => s.online).length;
 
@@ -366,6 +529,10 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
 
   const onlineCount = visibleSparks.filter((s) => s.online).length;
 
+  // A "cluster" is a head plus at least one worker. Anything else keeps the original overview.
+  const head = findHead(visibleSparks);
+  const isCluster = head !== null && visibleSparks.length > 1;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
       <div className="flex flex-wrap items-end justify-between gap-6">
@@ -419,11 +586,23 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         description={`Gracefully shut down all ${onlineShutdownCount} online Spark${onlineShutdownCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
         confirmLabel="Shut down all"
       />
-      <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
+      {/* Cluster view only appears once there is a cluster to describe — a single Spark keeps
+          the original plain overview rather than gaining a header that says "1 node". */}
+      {isCluster && <ClusterSummary sparks={visibleSparks} temperatureUnit={temperatureUnit} />}
+
+      <div
+        className={
+          isCluster
+            ? "overview-page grid sm:grid-cols-2"
+            : "overview-page grid sm:grid-cols-2 lg:grid-cols-3"
+        }
+        style={{ gap: "var(--density-page-gap)" }}
+      >
         {visibleSparks.map((spark) => (
           <SparkCard
             key={spark.id}
             spark={spark}
+            allSparks={sparks}
             headSparkName={
               spark.workerHeadId
                 ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null
@@ -434,6 +613,19 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           />
         ))}
       </div>
+
+      {isCluster && (
+        <ClusterLlmPanel
+          sparks={visibleSparks}
+          tpsHistory={tpsHistory}
+          prefillHistory={prefillHistory}
+        />
+      )}
+
+      {/* Terminal launchers, aligned one-per-card in the space the panels already left free.
+          Outside the cards on purpose: a button inside one would compete with card selection
+          and drag reordering. */}
+      <SshLaunchRow sparks={visibleSparks} />
     </div>
   );
 }

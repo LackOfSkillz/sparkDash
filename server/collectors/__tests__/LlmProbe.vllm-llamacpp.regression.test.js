@@ -91,7 +91,13 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.modelId, "meta-llama/Llama-3.1-8B");
   assert.equal(snap.contextLength, 8192);
   assert.equal(snap.generationTps, 200); // (900-500)/2
-  assert.equal(snap.prefillTps, 100); // (1200-1000)/2
+  // Prefill is no longer prompt-token delta over the poll interval. vLLM credits
+  // prompt_tokens_total at ADMISSION, so that ratio reported an 80K prompt as ~39,500 tok/s
+  // against a real effective rate near 1,600. It is now tokens over the seconds the TTFT
+  // histogram says were spent reaching first token. This fixture carries no TTFT series, so
+  // there is nothing measured to divide by and 0 is the truthful answer.
+  // The new behaviour is covered in prefillRate.test.js.
+  assert.equal(snap.prefillTps, 0);
   assert.equal(snap.slotsActive, 2);
   assert.equal(snap.requestsWaiting, 1);
   assert.equal(snap.kvCacheUsage, 0.42);
@@ -130,7 +136,8 @@ test("vLLM /metrics body is not misread as ds4", () => {
   probe.lastTokenCounts = { input: 0, output: 0 };
   probe._applyVllmMetrics(VLLM_METRICS, 2);
   assert.equal(probe.generationTps, 250); // 500/2
-  assert.equal(probe.prefillTps, 500); // 1000/2
+  // No TTFT series in this fixture, so no measured prefill time — see the note above.
+  assert.equal(probe.prefillTps, 0);
   // sticky sglang state must remain unused
   assert.equal(probe._sglangStickyTps, null);
 });
