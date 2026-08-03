@@ -17,7 +17,10 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
-import { SHOWCASE_BODY_LIMIT_BYTES } from "./collectors/showcaseLimits.js";
+import {
+  mountShowcaseBodyParser,
+  showcaseBodyErrorHandler,
+} from "./showcaseBodyParser.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { launchSshShell } from "./sshShell.js";
 import { sshBatchStats } from "./collectors/sshBatch.js";
@@ -114,6 +117,13 @@ function orderedSnapshots() {
 const app = express();
 const server = createServer(app);
 
+// Showcase carries whole prompt packets, which exceed the global 100 kb default.
+// This MUST be mounted before the global parser: Express runs middleware in
+// registration order, so a scoped parser attached at the route further down
+// never runs — the global one reads the stream first and throws
+// `entity.too.large`, and the caller gets a generic 413 that names no limit.
+// Proven by server/collectors/__tests__/showcaseHttpBody.test.js.
+mountShowcaseBodyParser(app, express);
 app.use(express.json());
 
 function clientKey(req) {
@@ -761,12 +771,11 @@ app.delete("/api/sparks/:id/llm/bench/:benchId", (req, res) => {
  * Returns 202 { sessionId }; poll GET for deltas; DELETE :sessionId to cancel.
  * Finished runs are archived; GET collection lists history; DELETE collection clears it.
  */
-// Showcase start carries whole prompt packets. The global 100 kb express.json()
-// default rejected those as a bare 413 before any Showcase validation ran, so
-// the caller learned nothing about which limit they hit. This larger parser is
-// mounted on this route only; the authoritative per-prompt and aggregate byte
-// checks still live in the manager, which returns a specific 400.
-app.post("/api/sparks/:id/llm/showcase", express.json({ limit: SHOWCASE_BODY_LIMIT_BYTES }), (req, res) => {
+// The larger body parser for this path is mounted ahead of the global one (see
+// mountShowcaseBodyParser near the top). By the time the request arrives here
+// the body is already parsed; the authoritative per-prompt and aggregate byte
+// checks live in the manager, which returns a specific 400.
+app.post("/api/sparks/:id/llm/showcase", (req, res) => {
   const spark = registry.getSpark(req.params.id);
   if (!spark) return res.status(404).json({ error: "Spark not found" });
   if (spark.workerNode) {
@@ -1108,6 +1117,13 @@ app.get("/api/diagnostics/liveness", (_req, res) => {
     ssh: sshBatchStats(),
   });
 });
+
+// Body-parser failures become a sanitized, limit-naming response rather than
+// Express's default HTML error page. Registered before the static handler so a
+// rejected API body never falls through to the SPA fallback. The body is never
+// echoed or logged — an oversized Showcase body is a prompt, and a prompt is a
+// manuscript.
+app.use(showcaseBodyErrorHandler());
 
 app.use(express.static(distDir));
 
