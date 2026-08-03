@@ -408,18 +408,28 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
 
-  // Short in-memory trace of head generation tok/s, so the cluster panel can show a trend.
-  // Deliberately not persisted and not a time series — it exists only for the sparkline, and
-  // resets on reload. Historical ranges are Phase 2.
+  // Rolling 60-second trace of head generation tok/s for the cluster panel's sparkline.
+  // Not persisted; it resets on reload. Historical ranges are Phase 2.
+  //
+  // Sampled on a fixed 1s timer rather than on value change. Appending only when the number
+  // moved made the x-axis "distinct values seen" instead of time: a steady 40 tok/s for ten
+  // seconds contributed a single point, and once generation stopped the value sat at 0 and
+  // nothing was appended at all — so the trace never decayed and kept displaying the shape of
+  // a run that had long finished. Measured at 44 points for three requests spread over ~110
+  // seconds. A fixed cadence makes the width mean elapsed time and lets idle flatten it out.
+  const TPS_TRACE_SECONDS = 60;
   const [tpsHistory, setTpsHistory] = useState<number[]>([]);
-  const lastTpsRef = useRef<number | null>(null);
   const headTps = activeLlm(findHead(sparks))?.generationTps ?? null;
+  const headTpsRef = useRef<number | null>(null);
+  headTpsRef.current = headTps;
   useEffect(() => {
-    if (headTps === null) return;
-    if (lastTpsRef.current === headTps) return;
-    lastTpsRef.current = headTps;
-    setTpsHistory((prev) => [...prev, headTps].slice(-40));
-  }, [headTps]);
+    const id = setInterval(() => {
+      // No reading yet is not the same as zero, so hold the trace until one arrives.
+      if (headTpsRef.current === null) return;
+      setTpsHistory((prev) => [...prev, headTpsRef.current ?? 0].slice(-TPS_TRACE_SECONDS));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const onlineShutdownCount = sparks.filter((s) => s.online).length;
 
