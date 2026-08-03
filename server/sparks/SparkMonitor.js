@@ -477,12 +477,31 @@ export class SparkMonitor {
         case "memory":
           this._metrics.unifiedMemory = result;
           break;
-        case "llm":
-          this._metrics.llm = result;
-          if (Array.isArray(result) && result.some((l) => l && l.available)) {
-            this._lastLlmOkAt = Date.now();
+        case "llm": {
+          const nowMs = Date.now();
+          const anyAvailable = Array.isArray(result) && result.some((l) => l && l.available);
+          if (anyAvailable) {
+            this._metrics.llm = result;
+            this._lastLlmOkAt = nowMs;
+          } else if (
+            this._lastLlmOkAt > 0 &&
+            nowMs - this._lastLlmOkAt <= LLM_EVIDENCE_MAX_AGE_MS &&
+            Array.isArray(this._metrics.llm) &&
+            this._metrics.llm.some((l) => l && l.available)
+          ) {
+            // A probe that failed to reach the endpoint is not the endpoint reporting itself
+            // gone. Over a marginal link one timed-out probe used to blank the LLM block, and
+            // the overview keys its whole cluster layout off that — the panels unmounted and
+            // the page reflowed. Hold the last good reading briefly; if the endpoint really is
+            // down, the window lapses and the unavailable result lands as normal.
+            this._llmRetainedSince = this._llmRetainedSince ?? nowMs;
+          } else {
+            this._metrics.llm = result;
+            this._llmRetainedSince = null;
           }
+          if (anyAvailable) this._llmRetainedSince = null;
           break;
+        }
       }
       this._lastUpdate[domain] = Date.now();
       this._lastSuccessAt[domain] = Date.now();

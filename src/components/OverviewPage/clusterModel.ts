@@ -66,21 +66,39 @@ export function activeLlm(spark: SparkSnapshot | null | undefined): LlmMetrics |
  * heads something — i.e. some other Spark is a worker. A lone standalone stays STANDALONE.
  * This changes labels only; nothing persisted is rewritten.
  */
+/**
+ * Which standalone, if any, heads this cluster.
+ *
+ * Whether a node is the head is a property of how the cluster is CONFIGURED, not of whether an
+ * HTTP probe answered in the last second. This used to require `activeLlm`, so one failed probe
+ * made the head read as STANDALONE, which made findHead return null, which unmounted both
+ * cluster panels and reflowed the node cards from two columns to three — the page visibly shrank
+ * and sprang back. Topology must not flicker on a transient probe.
+ *
+ * A serving standalone still wins when several are present, because that genuinely disambiguates
+ * which one is the head. The fallback only applies where there is nothing to disambiguate.
+ */
+function headStandalone(sparks: SparkSnapshot[]): SparkSnapshot | null {
+  const hasWorker = sparks.some((s) => resolveSparkRole(s) === "worker");
+  if (!hasWorker) return null;
+  const standalones = sparks.filter((s) => resolveSparkRole(s) === "standalone");
+  const serving = standalones.find((s) => activeLlm(s));
+  if (serving) return serving;
+  return standalones.length === 1 ? standalones[0] : null;
+}
+
 export function displayRole(spark: SparkSnapshot, all: SparkSnapshot[]): "HEAD" | "WORKER" | "STANDALONE" {
   const role = resolveSparkRole(spark);
   if (role === "worker") return "WORKER";
   if (role === "head") return "HEAD";
-  const hasWorker = all.some((s) => resolveSparkRole(s) === "worker");
-  return hasWorker && activeLlm(spark) ? "HEAD" : "STANDALONE";
+  return headStandalone(all)?.id === spark.id ? "HEAD" : "STANDALONE";
 }
 
-/** The Spark serving the cluster's model — an explicit head first, else a standalone with an LLM. */
+/** The Spark serving the cluster's model — an explicit head first, else the heading standalone. */
 export function findHead(sparks: SparkSnapshot[]): SparkSnapshot | null {
   const explicit = sparks.find((s) => resolveSparkRole(s) === "head");
   if (explicit) return explicit;
-  const hasWorker = sparks.some((s) => resolveSparkRole(s) === "worker");
-  if (!hasWorker) return null;
-  return sparks.find((s) => resolveSparkRole(s) === "standalone" && activeLlm(s)) ?? null;
+  return headStandalone(sparks);
 }
 
 export function findWorkers(sparks: SparkSnapshot[]): SparkSnapshot[] {

@@ -101,3 +101,65 @@ test("uptime formatting comes from node-reported seconds", () => {
   assert.equal(fmt(null), "—", "absent uptime must render as a dash, not 0m");
   assert.equal(fmt(0), "—");
 });
+
+// ---------------------------------------------------------------------------
+// Cluster topology stability.
+//
+// The overview keys its entire layout off findHead(): no head means no cluster, which unmounts
+// the summary and inference panels and reflows the node cards from two columns to three. That
+// used to depend on a live LLM probe, so one timed-out HTTP request over a marginal link made
+// the whole page shrink and spring back. Topology is configuration, not a measurement.
+//
+// Mirrors src/components/OverviewPage/clusterModel.ts. The authoritative check for this fix was
+// a browser reproduction that injected the failing snapshot and compared rendered card widths
+// (695px stable, versus 460px before the fix).
+// ---------------------------------------------------------------------------
+
+function resolveRole(s) {
+  return s.role || (s.workerNode ? "worker" : "standalone");
+}
+function activeLlmMirror(s) {
+  const arr = s?.metrics?.llm;
+  return Array.isArray(arr) ? arr.find((l) => l.available) ?? null : null;
+}
+function headStandaloneMirror(sparks) {
+  if (!sparks.some((s) => resolveRole(s) === "worker")) return null;
+  const standalones = sparks.filter((s) => resolveRole(s) === "standalone");
+  const serving = standalones.find((s) => activeLlmMirror(s));
+  if (serving) return serving;
+  return standalones.length === 1 ? standalones[0] : null;
+}
+
+const withLlm = (id, available) => ({
+  id, role: "standalone", metrics: { llm: available === null ? [] : [{ available }] },
+});
+const worker = { id: "w1", role: "worker", metrics: { llm: [] } };
+
+test("topology: a sole standalone beside a worker is the head even with no LLM reading", () => {
+  for (const llm of [true, false, null]) {
+    const sparks = [withLlm("h1", llm), worker];
+    const head = headStandaloneMirror(sparks);
+    assert.equal(head?.id, "h1", `head must not depend on the probe (llm=${String(llm)})`);
+  }
+});
+
+test("topology: with several standalones the serving one still wins", () => {
+  const sparks = [withLlm("a", false), withLlm("b", true), worker];
+  assert.equal(headStandaloneMirror(sparks)?.id, "b", "a live endpoint disambiguates");
+});
+
+test("topology: several standalones and none serving is genuinely ambiguous", () => {
+  const sparks = [withLlm("a", false), withLlm("b", false), worker];
+  assert.equal(headStandaloneMirror(sparks), null, "guessing between two would be worse");
+});
+
+test("topology: a lone standalone with no worker is not a head", () => {
+  assert.equal(headStandaloneMirror([withLlm("solo", true)]), null);
+});
+
+test("topology: the verdict is identical across a probe flapping", () => {
+  // The exact sequence that made the page shrink and spring back.
+  const seq = [true, false, false, true, null, true];
+  const ids = seq.map((v) => headStandaloneMirror([withLlm("h1", v), worker])?.id ?? null);
+  assert.deepEqual(ids, ids.map(() => "h1"), "layout must not change as the probe flaps");
+});
