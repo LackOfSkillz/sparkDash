@@ -1585,9 +1585,10 @@ input[type="checkbox"] {
   text-decoration: none;
 }
 .showcase-brand__mark {
-  /* No color here: the brand mark is an image with its own gold, not a currentColor icon. */
-  width: 1.05rem;
-  height: 1.05rem;
+  /* No color here: the brand mark is an image with its own gold, not a currentColor icon.
+     Height only — the mark is wider than it is tall, so fixing both axes would squash it. */
+  height: 20px;
+  width: auto;
   flex-shrink: 0;
 }
 

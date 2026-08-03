@@ -212,7 +212,7 @@ function DashboardApp() {
             onClick={() => navigate(OVERVIEW_ID)}
             className="logo-pill"
           >
-            <EagleIcon className="h-4 w-4" />
+            <EagleIcon className="h-[20px] w-auto" />
             <span>
               Aetos<span className="logo-pill-dash">Dash</span>
             </span>
