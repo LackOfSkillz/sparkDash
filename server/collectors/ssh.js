@@ -11,6 +11,7 @@ import { SSH_CONNECT_TIMEOUT } from "../config.js";
 import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 import { enqueueSshCommand } from "./sshBatch.js";
+import { resolveHost, reportFailure, reportSuccess } from "../sparks/hostResolve.js";
 
 /**
  * Build the minimal environment handed to the ssh/sshpass child.
@@ -106,8 +107,13 @@ export async function sshExec(spark, cmd, options = {}) {
   if (options.noBatch) return sshExecDirect(spark, cmd, options);
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
-  const { host, user } = spark.ssh || {};
-  const key = `${user || ""}@${host || spark.lanIp || ""}`;
+  const { user } = spark.ssh || {};
+  // The queue key MUST come from the same resolver the connection will use.
+  // Keying on raw config while the connection had failed over to Tailscale would
+  // drop commands aimed at two different addresses into one batch — and the
+  // batcher concatenates a batch into ONE remote shell invocation, so they would
+  // all execute against whichever address that invocation happened to use.
+  const key = `${user || ""}@${resolveHost(spark) || ""}`;
   return enqueueSshCommand(key, cmd, timeoutMs, (script, batchTimeout) =>
     sshExecDirect(spark, script, { timeoutMs: batchTimeout })
   );
@@ -125,8 +131,10 @@ export async function sshExec(spark, cmd, options = {}) {
 export async function sshExecDirect(spark, cmd, options = {}) {
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
-  const { host, user, auth, password } = spark.ssh || {};
-  const targetHost = host || spark.lanIp;
+  const { user, auth, password } = spark.ssh || {};
+  // LAN first, Tailscale as fallback. `options.host` lets the retry below pin an
+  // address explicitly so the second attempt cannot re-resolve and loop.
+  const targetHost = options.host || resolveHost(spark);
 
   if (!targetHost || !user) {
     throw new Error(`SSH config missing for ${spark.id}: host=${targetHost}, user=${user}`);
@@ -178,16 +186,40 @@ export async function sshExecDirect(spark, cmd, options = {}) {
     args = [...baseOpts, "-o", "BatchMode=yes", "--", remote, cmd];
   }
 
-  return new Promise((resolve, reject) => {
+  const attempt = await new Promise((resolve) => {
     execFile(file, args, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        const msg = stderr?.trim() || err.message;
-        reject(new Error(`SSH to ${targetHost} failed: ${msg}`));
-      } else {
-        resolve(String(stdout).trim());
-      }
+      if (err) resolve({ ok: false, msg: stderr?.trim() || err.message });
+      else resolve({ ok: true, out: String(stdout).trim() });
     });
   });
+
+  if (attempt.ok) {
+    reportSuccess(spark, targetHost);
+    return attempt.out;
+  }
+
+  // The primary failed. If a Tailscale address is configured, try it ONCE — and
+  // only when this call did not already pin a host, so the retry cannot recurse.
+  const retryHost = options.host ? null : reportFailure(spark, targetHost);
+  if (retryHost) {
+    try {
+      const out = await sshExecDirect(spark, cmd, { ...options, host: retryHost });
+      console.warn(
+        `[hostResolve] ${spark.id}: ${targetHost} unreachable, now using ${retryHost}`
+      );
+      return out;
+    } catch (fallbackErr) {
+      // Both paths are down. Report the FALLBACK's failure, and surface both
+      // addresses — "SSH to 192.168.1.200 failed" would be misleading when the
+      // Tailscale path was also tried and also failed.
+      reportFailure(spark, retryHost);
+      throw new Error(
+        `SSH to ${targetHost} failed: ${attempt.msg} (fallback ${retryHost} also failed: ${fallbackErr.message})`
+      );
+    }
+  }
+
+  throw new Error(`SSH to ${targetHost} failed: ${attempt.msg}`);
 }
 
 /**

@@ -33,7 +33,7 @@ export function isValidHost(host) {
  * Uses the configured host only — not the process bind address.
  * Hostnames (except localhost) are "unknown" (no DNS lookup).
  *
- * @returns {"local" | "lan" | "public" | "unknown"}
+ * @returns {"local" | "lan" | "tailscale" | "public" | "unknown"}
  */
 export function classifyHostScope(host) {
   if (typeof host !== "string" || !host.trim()) return "unknown";
@@ -46,6 +46,12 @@ export function classifyHostScope(host) {
   if (a === 172 && b >= 16 && b <= 31) return "lan";
   if (a === 192 && b === 168) return "lan";
   if (a === 169 && b === 254) return "lan";
+  // 100.64.0.0/10 — CGNAT, the range Tailscale assigns. Without this branch a
+  // Tailscale address falls through to "public", and the LLM security posture
+  // then flags an open endpoint as level "danger" when it is actually reachable
+  // only inside an authenticated mesh. It is not a LAN either, so it gets its
+  // own scope rather than being quietly folded into one.
+  if (a === 100 && b >= 64 && b <= 127) return "tailscale";
   if (a === 0 || a >= 224) return "unknown";
   return "public";
 }
@@ -106,6 +112,10 @@ export function validateSparkTarget(body) {
   }
   if (lanIp && !isAllowedTargetHost(lanIp)) {
     return `Invalid or disallowed lanIp: ${lanIp}`;
+  }
+  const tailscaleIp = body?.tailscaleIp || "";
+  if (tailscaleIp && !isAllowedTargetHost(tailscaleIp)) {
+    return `Invalid or disallowed tailscaleIp: ${tailscaleIp}`;
   }
   const user = body?.ssh?.user;
   if (user != null && user !== "" && !isValidSshUser(user)) {

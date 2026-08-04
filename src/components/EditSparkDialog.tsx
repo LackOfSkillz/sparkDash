@@ -311,6 +311,23 @@ export function EditSparkDialog({
               </div>
 
               <div>
+                <label className="mb-1 block text-xs text-muted">
+                  Tailscale IP (optional fallback)
+                </label>
+                <input
+                  type="text"
+                  value={config.tailscaleIp || ""}
+                  placeholder="100.x.y.z"
+                  onChange={(e) => update({ tailscaleIp: e.target.value || null })}
+                  className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                />
+                <p className="mt-1 text-[11px] leading-snug text-muted">
+                  Used only when the LAN address stops answering. Wake-on-LAN always uses the LAN
+                  address.
+                </p>
+              </div>
+
+              <div>
                 <label className="mb-1 block text-xs text-muted">CX7 IP (optional)</label>
                 <input
                   type="text"

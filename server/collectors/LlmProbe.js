@@ -60,7 +60,15 @@ export class LlmProbe {
   constructor(spark, port = 8888) {
     this.spark = spark;
     this.port = port;
-    this.baseUrl = `http://${llmProbeHost(spark)}:${port}`;
+    // baseUrl used to be a field latched at construction. That made an address
+    // change invisible to a probe that already existed — including a LAN →
+    // Tailscale failover, which happens at runtime and never touches config.
+    // A getter re-resolves per read; the constructor shape is unchanged, so
+    // `new LlmProbe({ lanIp: "10.0.0.1" }, port)` still yields that URL.
+    Object.defineProperty(this, "baseUrl", {
+      enumerable: true,
+      get: () => `http://${llmProbeHost(this.spark)}:${this.port}`,
+    });
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | null
@@ -133,7 +141,7 @@ export class LlmProbe {
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
     }
-    this.baseUrl = `http://${llmProbeHost(this.spark)}:${this.port}`;
+    // baseUrl is a getter now — reading it re-resolves. No assignment.
     if (this.baseUrl !== prevUrl) {
       this._resetDetection();
       this._lastDetectAt = 0;
@@ -1061,12 +1069,14 @@ export class LlmProbe {
     const scopeWords = {
       local: "loopback",
       lan: "LAN",
+      tailscale: "Tailscale",
       public: "public",
       unknown: "unknown-host",
     };
     const shortScope = {
       local: "Local",
       lan: "LAN",
+      tailscale: "Tailscale",
       public: "Public",
       unknown: "Host",
     };

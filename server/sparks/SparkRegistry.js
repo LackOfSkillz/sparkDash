@@ -483,6 +483,12 @@ export class SparkRegistry {
       name: config.name || config.id,
       lanIp: config.lanIp || "",
       cx7Ip: config.cx7Ip || null,
+      /**
+       * Optional Tailscale address. Used only when the LAN address stops
+       * answering — never for Wake-on-LAN, which is an L2 broadcast and has no
+       * meaning on a Tailscale L3 mesh.
+       */
+      tailscaleIp: config.tailscaleIp || null,
       /** Optional user override for Wake-on-LAN. Empty → use detectedMacAddress. */
       macAddress: config.macAddress || null,
       /** Last MAC seen on enP7s7 (auto; not set via public PATCH). */

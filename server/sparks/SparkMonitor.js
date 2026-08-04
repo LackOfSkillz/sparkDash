@@ -11,6 +11,7 @@ import {
   LIVENESS_FAILURE_THRESHOLD,
   OFFLINE_GRACE_MS,
 } from "./nodeLiveness.js";
+import { hostDiagnostics } from "./hostResolve.js";
 import {
   POLL_INTERVAL_GPU,
   POLL_INTERVAL_CPU,
@@ -189,6 +190,11 @@ export class SparkMonitor {
       pollsSkippedInFlight: c.pollsSkippedInFlight,
       stateTransitions: c.transitions,
       metricFreshness: metricFreshness(this._hardwareLastSuccessAt(), Date.now()),
+      // Which address is actually in use, and how often it has flipped. The
+      // liveness state machine collapses reachability to one bit on purpose, so
+      // without this a node reachable ONLY over Tailscale would look identical
+      // to a healthy LAN node and the failover would be invisible.
+      host: hostDiagnostics(this.spark),
     };
   }
 

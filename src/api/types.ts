@@ -5,6 +5,11 @@ export interface SparkConfig {
   lanIp: string;
   cx7Ip?: string | null;
   /**
+   * Optional Tailscale address, used only when the LAN address stops
+   * answering. Never used for Wake-on-LAN — that is an L2 broadcast.
+   */
+  tailscaleIp?: string | null;
+  /**
    * Optional Wake-on-LAN MAC override. When empty, the server uses
    * `detectedMacAddress` from the enP7s7 interface.
    */

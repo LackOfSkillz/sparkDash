@@ -26,6 +26,13 @@ export function normalizeMac(mac) {
 
 /**
  * Derive a /24 directed broadcast from an IPv4 address, else global broadcast.
+ *
+ * DELIBERATELY takes `lanIp` and never a resolved host. Wake-on-LAN is an L2
+ * broadcast to x.y.z.255; Tailscale is an L3 mesh with no broadcast domain, so a
+ * magic packet addressed to 100.x.y.255 goes nowhere. A Spark that has failed
+ * over to Tailscale must still be woken on its LAN address — and if the LAN is
+ * genuinely gone, WoL could not have reached it either way.
+ *
  * @param {unknown} lanIp
  */
 export function broadcastForLanIp(lanIp) {
