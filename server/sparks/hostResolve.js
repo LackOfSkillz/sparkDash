@@ -6,18 +6,28 @@
  * fallback — the LAN path is faster and does not depend on a third-party mesh
  * being up, so it should never be abandoned lightly.
  *
- * WHY THIS IS STICKY RATHER THAN "TRY BOTH EVERY TIME".
+ * THE POLICY: SETTLE, THEN STAY, AND ONLY RE-PROBE ON LOSS.
  *
- * SSH_CONNECT_TIMEOUT is 5s and the liveness poll runs every 5s. Trying LAN and
- * then Tailscale on every single poll would cost up to 10s per cycle against a
- * 5s cadence: polls would overlap, get skipped, and the three-consecutive-
- * failure countdown to "offline" would stretch out. Detection would get SLOWER
- * by adding a feature meant to improve reachability.
+ * Try the LAN. If it answers, stay on it. If it does not, move to Tailscale and
+ * stay there — indefinitely, with no periodic re-probing. The only thing that
+ * sends us back to the LAN is the address we are ON failing.
  *
- * So a failover is remembered. Once the LAN path fails and Tailscale answers,
- * subsequent calls go straight to Tailscale. The LAN is retried on a cooldown so
- * the system comes home by itself when the laptop is back on the home network —
- * it does not stay on the slower path forever just because it once worked.
+ * The alternative — re-testing the LAN on a timer — was the first version and it
+ * was wrong for how this is actually used. A machine moves between home and
+ * office about twice a day, so a 60s re-probe meant ~700 deliberately doomed
+ * 5-second SSH attempts per node per day to discover something that changes
+ * twice. It also cannot be cheap: SSH_CONNECT_TIMEOUT is 5s and the liveness
+ * poll runs every 5s, so every re-probe risks overlapping a poll, and skipped
+ * polls slow the three-consecutive-failure countdown to "offline". A feature
+ * meant to improve reachability would have made outage detection slower.
+ *
+ * Losing the connection is the honest signal that the network changed, and it
+ * arrives exactly when it matters. Nothing else needs to poll for it.
+ *
+ * Consequence worth knowing: once settled on Tailscale, that is where it stays
+ * even back on the home network, until Tailscale itself drops. In practice
+ * Tailscale routes peers on the same LAN directly, so the cost is negligible —
+ * and a dashboard restart re-probes from the LAN, since this state is in memory.
  *
  * WHAT THIS MODULE DOES NOT DO.
  *
@@ -27,8 +37,20 @@
  * and must keep doing so.
  */
 
-/** How long to stay on the fallback before re-testing the primary. */
-export const PRIMARY_RETRY_COOLDOWN_MS = 60_000;
+/**
+ * Consecutive failures on the settled address before we go back to the primary.
+ *
+ * One failed command is NOT "the connection is lost". A single SSH can fail for
+ * reasons that have nothing to do with the path: a slow remote command, a
+ * momentary hiccup, a timeout inherited from an earlier attempt in the same
+ * call. Treating any one of those as a network change made the resolver thrash
+ * — settle on the fallback, blip, go back to the primary, burn a 5s connect
+ * timeout, settle again — which is what a naive version of this actually did.
+ *
+ * Three mirrors LIVENESS_FAILURE_THRESHOLD, so an address is abandoned on the
+ * same evidence a node is declared offline on.
+ */
+export const SETTLED_FAILURE_THRESHOLD = 3;
 
 /**
  * @typedef {object} HostState
@@ -36,6 +58,7 @@ export const PRIMARY_RETRY_COOLDOWN_MS = 60_000;
  * @property {number} lastPrimaryFailureAt
  * @property {number} failoverCount
  * @property {number} lastSuccessAt
+ * @property {number} settledFailures consecutive failures on the active address
  */
 
 /** @type {Map<string, HostState>} sparkId → state */
@@ -44,7 +67,10 @@ const state = new Map();
 function stateFor(sparkId) {
   let s = state.get(sparkId);
   if (!s) {
-    s = { active: "primary", lastPrimaryFailureAt: 0, failoverCount: 0, lastSuccessAt: 0 };
+    s = {
+      active: "primary", lastPrimaryFailureAt: 0, failoverCount: 0,
+      lastSuccessAt: 0, settledFailures: 0,
+    };
     state.set(sparkId, s);
   }
   return s;
@@ -79,11 +105,10 @@ export function resolveHost(spark, now = Date.now()) {
   if (!primary) return fallback;
 
   const s = stateFor(spark.id);
-  if (s.active === "primary") return primary;
-  // On the fallback: periodically re-offer the primary so a machine that comes
-  // back onto the LAN returns to it without needing a restart.
-  if (now - s.lastPrimaryFailureAt >= PRIMARY_RETRY_COOLDOWN_MS) return primary;
-  return fallback;
+  // Settled means settled. No timer re-offers the primary; the only route back
+  // is `reportFailure` on the address currently in use.
+  void now;
+  return s.active === "primary" ? primary : fallback;
 }
 
 /** True when `host` is this Spark's fallback address. */
@@ -106,17 +131,29 @@ export function reportFailure(spark, host, now = Date.now()) {
   const s = stateFor(spark.id);
 
   if (clean(host) === primary) {
-    if (s.active === "primary") s.failoverCount++;
+    // A primary failure always moves to the fallback immediately: there is
+    // another address to try right now, so trying it costs one attempt and
+    // answers the question. Counting the transition only when we were actually
+    // on the primary keeps concurrent pollers from inflating it.
+    if (s.active === "primary") {
+      s.failoverCount++;
+      s.settledFailures = 0;
+    }
     s.active = "fallback";
     s.lastPrimaryFailureAt = now;
     return fallback;
   }
-  // The fallback failed. Go back to preferring the primary next time: if
-  // everything is down we want the next cycle to start from the preferred path,
-  // not to stay parked on the one that just failed.
+
+  // The address we settled on failed. This is the ONLY re-probe trigger — but
+  // it takes SETTLED_FAILURE_THRESHOLD consecutive failures, because one failed
+  // command is not a lost connection, and treating it as one made this thrash.
   if (clean(host) === fallback) {
-    s.active = "primary";
-    s.lastPrimaryFailureAt = 0;
+    s.settledFailures++;
+    if (s.settledFailures >= SETTLED_FAILURE_THRESHOLD) {
+      s.active = "primary";
+      s.lastPrimaryFailureAt = 0;
+      s.settledFailures = 0;
+    }
   }
   return null;
 }
@@ -127,6 +164,9 @@ export function reportSuccess(spark, host, now = Date.now()) {
   if (!spark?.id || !fallback || !primary) return;
   const s = stateFor(spark.id);
   s.lastSuccessAt = now;
+  // Any success on the address in use clears the run of failures toward
+  // abandoning it — the threshold counts CONSECUTIVE failures.
+  s.settledFailures = 0;
   s.active = clean(host) === fallback ? "fallback" : "primary";
   if (s.active === "primary") s.lastPrimaryFailureAt = 0;
 }

@@ -8,18 +8,18 @@ import {
   hostDiagnostics,
   isFallbackHost,
   _resetHostState,
-  PRIMARY_RETRY_COOLDOWN_MS,
+  SETTLED_FAILURE_THRESHOLD,
 } from "../hostResolve.js";
 import { classifyHostScope } from "../../validate.js";
 import { broadcastForLanIp } from "../../wol.js";
 
 /**
- * LAN first, Tailscale as fallback.
+ * LAN first, Tailscale as fallback. Settle, stay, re-probe only on loss.
  *
- * The behaviour that matters is not "can it use the fallback" — it is that the
- * fallback is STICKY (so a 5s poll interval is not doubled on every cycle) and
- * that it comes HOME again (so the dashboard does not stay on the slower path
- * forever after one blip).
+ * The behaviour that matters is not "can it use the fallback" — it is that
+ * having settled, it STOPS probing. A machine moves networks about twice a day;
+ * a timer-based re-probe meant hundreds of doomed 5-second SSH attempts per day
+ * to discover something that announces itself the moment it happens.
  */
 
 const spark = (over = {}) => ({
@@ -50,22 +50,66 @@ test("falls back to Tailscale after the LAN fails, and says so", () => {
   assert.equal(isFallbackHost(s, "100.92.130.112"), true);
 });
 
-test("the failover is sticky, so a 5s poll is not doubled every cycle", () => {
-  const s = spark();
-  reportFailure(s, "192.168.1.200");
-  // Repeated resolves inside the cooldown keep returning the fallback rather
-  // than re-testing the LAN and paying another 5s connect timeout.
-  for (let i = 0; i < 10; i++) {
-    assert.equal(resolveHost(s, Date.now() + i * 1000), "100.92.130.112");
-  }
-});
-
-test("comes home: the LAN is re-offered after the cooldown", () => {
+test("once settled it stays settled — no timer ever re-offers the LAN", () => {
   const s = spark();
   const t0 = 1_000_000;
   reportFailure(s, "192.168.1.200", t0);
-  assert.equal(resolveHost(s, t0 + PRIMARY_RETRY_COOLDOWN_MS - 1), "100.92.130.112");
-  assert.equal(resolveHost(s, t0 + PRIMARY_RETRY_COOLDOWN_MS), "192.168.1.200");
+  // A full day later, still on the fallback. Nothing re-probes on a schedule.
+  for (const minutes of [1, 5, 60, 240, 1440]) {
+    assert.equal(resolveHost(s, t0 + minutes * 60_000), "100.92.130.112",
+      `still on the fallback after ${minutes} minutes`);
+  }
+  assert.equal(hostDiagnostics(s).failoverCount, 1,
+    "one network change is one failover, not one per probe interval");
+});
+
+test("one blip on the settled address does NOT unsettle it", () => {
+  // This is what made the first version thrash: a single failed command sent it
+  // back to the LAN, which then burned a 5s connect timeout, which settled it
+  // again — repeatedly, forever.
+  const s = spark();
+  reportFailure(s, "192.168.1.200");
+  assert.equal(resolveHost(s), "100.92.130.112");
+
+  reportFailure(s, "100.92.130.112");
+  assert.equal(resolveHost(s), "100.92.130.112", "one failure is not a lost connection");
+  reportFailure(s, "100.92.130.112");
+  assert.equal(resolveHost(s), "100.92.130.112", "two is still not");
+
+  // A success in between clears the run.
+  reportSuccess(s, "100.92.130.112");
+  reportFailure(s, "100.92.130.112");
+  reportFailure(s, "100.92.130.112");
+  assert.equal(resolveHost(s), "100.92.130.112", "the count is consecutive failures");
+});
+
+test("sustained failure on the settled address is the re-probe trigger", () => {
+  const s = spark();
+  reportFailure(s, "192.168.1.200");
+  assert.equal(resolveHost(s), "100.92.130.112");
+
+  // Three consecutive — the connection really is gone.
+  for (let i = 0; i < SETTLED_FAILURE_THRESHOLD; i++) reportFailure(s, "100.92.130.112");
+  assert.equal(resolveHost(s), "192.168.1.200", "next attempt starts from the LAN again");
+
+  // Back home: the LAN answers and it settles there.
+  reportSuccess(s, "192.168.1.200");
+  assert.equal(resolveHost(s), "192.168.1.200");
+  assert.equal(hostDiagnostics(s).usingFallback, false);
+});
+
+test("a full home → office → home cycle costs two failovers, not hundreds", () => {
+  const s = spark();
+  reportSuccess(s, "192.168.1.200");            // at home
+  reportFailure(s, "192.168.1.200");            // left for the office
+  reportSuccess(s, "100.92.130.112");           // settled on Tailscale
+  for (let i = 0; i < 500; i++) resolveHost(s); // a whole day of polling
+  assert.equal(hostDiagnostics(s).failoverCount, 1);
+
+  for (let i = 0; i < SETTLED_FAILURE_THRESHOLD; i++) reportFailure(s, "100.92.130.112"); // lost on the way home
+  reportSuccess(s, "192.168.1.200");            // home LAN answers
+  assert.equal(resolveHost(s), "192.168.1.200");
+  assert.equal(hostDiagnostics(s).failoverCount, 1, "coming home is not a failover");
 });
 
 test("a success on the LAN clears the failover", () => {
@@ -81,9 +125,9 @@ test("a failure on the FALLBACK earns no further retry — that is a real outage
   reportFailure(s, "192.168.1.200");
   const retry = reportFailure(s, "100.92.130.112");
   assert.equal(retry, null, "both paths down must be reported, not retried around");
-  // And the next cycle starts from the preferred path rather than parking on
-  // the address that just failed.
-  assert.equal(resolveHost(s), "192.168.1.200");
+  // It stays on the fallback for now: one failure is not proof the path is gone,
+  // and re-offering the LAN here is exactly what caused the thrash.
+  assert.equal(resolveHost(s), "100.92.130.112");
 });
 
 test("with no Tailscale address configured nothing changes", () => {
