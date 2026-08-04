@@ -118,6 +118,34 @@ export function isFallbackHost(spark, host) {
 }
 
 /**
+ * Should a failed attempt on `host` be retried on the SAME address first?
+ *
+ * Measured on this deployment: about 8% of storage polls fail over Tailscale
+ * while the link itself is continuously up — 20 consecutive round trips showed
+ * median 756ms, p90 841ms, zero failures, and the exact batched script the
+ * dashboard sends succeeded 8 times out of 8 by hand. So an isolated failure is
+ * contention, not a network change, and one immediate retry at ~800ms absorbs
+ * it: an 8% independent failure rate becomes about 0.6%.
+ *
+ * The retry is allowed ONLY when this address has no run of failures behind it.
+ * That matters for how fast a genuine outage is noticed: without the guard, a
+ * dead host would pay a doubled timeout on EVERY call, and with a second address
+ * to try as well that is four connect timeouts per poll. With it, a host going
+ * down pays one extra attempt once, and then every later call fails at the
+ * normal speed.
+ */
+export function shouldRetryTransient(spark, host) {
+  const { primary, fallback } = hostCandidates(spark);
+  if (!spark?.id) return false;
+  const h = clean(host);
+  if (h !== primary && h !== fallback) return false;
+  const s = state.get(spark.id);
+  if (!s) return true; // no history: a first failure is as likely to be a blip
+  const activeHost = s.active === "fallback" ? fallback : primary;
+  return h === activeHost && s.settledFailures === 0;
+}
+
+/**
  * Record that an attempt on `host` failed, and say whether a retry on the other
  * address is worth making. Returns the address to retry on, or null.
  *

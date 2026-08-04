@@ -9,6 +9,7 @@ import {
   isFallbackHost,
   _resetHostState,
   SETTLED_FAILURE_THRESHOLD,
+  shouldRetryTransient,
 } from "../hostResolve.js";
 import { classifyHostScope } from "../../validate.js";
 import { broadcastForLanIp } from "../../wol.js";
@@ -203,4 +204,46 @@ test("Wake-on-LAN never broadcasts to a Tailscale address", () => {
   assert.equal(broadcastForLanIp("192.168.1.200"), "192.168.1.255");
   assert.equal(broadcastForLanIp("100.92.130.112"), "100.92.130.255",
     "the helper is pure — the guarantee is that callers pass lanIp, asserted below");
+});
+
+// ---------------------------------------------------------------------------
+// Transient-blip absorption
+// ---------------------------------------------------------------------------
+
+test("an isolated failure on a working address is retried on the same address", () => {
+  const s = spark();
+  reportSuccess(s, "192.168.1.200");
+  assert.equal(shouldRetryTransient(s, "192.168.1.200"), true,
+    "a path with no failure run behind it gets one immediate retry");
+});
+
+test("a host already failing is NOT retried, so an outage is not slowed", () => {
+  // Without this guard a dead host pays a doubled connect timeout on every
+  // single call — and with a second address to try too, four timeouts a poll.
+  const s = spark();
+  reportFailure(s, "192.168.1.200");   // settled on the fallback
+  reportFailure(s, "100.92.130.112");  // the fallback is now failing too
+  assert.equal(shouldRetryTransient(s, "100.92.130.112"), false);
+});
+
+test("a success clears the run, so the next blip is absorbed again", () => {
+  const s = spark();
+  reportFailure(s, "192.168.1.200");
+  reportFailure(s, "100.92.130.112");
+  assert.equal(shouldRetryTransient(s, "100.92.130.112"), false);
+  reportSuccess(s, "100.92.130.112");
+  assert.equal(shouldRetryTransient(s, "100.92.130.112"), true);
+});
+
+test("only the address currently in use is retried", () => {
+  const s = spark();
+  reportFailure(s, "192.168.1.200");   // now on the fallback
+  assert.equal(shouldRetryTransient(s, "192.168.1.200"), false,
+    "the address we already moved off is not worth a second attempt");
+  assert.equal(shouldRetryTransient(s, "100.92.130.112"), true);
+});
+
+test("an unrelated address is never retried", () => {
+  const s = spark();
+  assert.equal(shouldRetryTransient(s, "10.9.9.9"), false);
 });

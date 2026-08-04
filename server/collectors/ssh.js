@@ -11,7 +11,9 @@ import { SSH_CONNECT_TIMEOUT } from "../config.js";
 import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 import { enqueueSshCommand } from "./sshBatch.js";
-import { resolveHost, reportFailure, reportSuccess } from "../sparks/hostResolve.js";
+import {
+  resolveHost, reportFailure, reportSuccess, shouldRetryTransient,
+} from "../sparks/hostResolve.js";
 
 /**
  * Build the minimal environment handed to the ssh/sshpass child.
@@ -186,12 +188,24 @@ export async function sshExecDirect(spark, cmd, options = {}) {
     args = [...baseOpts, "-o", "BatchMode=yes", "--", remote, cmd];
   }
 
-  const attempt = await new Promise((resolve) => {
-    execFile(file, args, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) resolve({ ok: false, msg: stderr?.trim() || err.message });
-      else resolve({ ok: true, out: String(stdout).trim() });
+  const run = () =>
+    new Promise((resolve) => {
+      execFile(file, args, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) resolve({ ok: false, msg: stderr?.trim() || err.message });
+        else resolve({ ok: true, out: String(stdout).trim() });
+      });
     });
-  });
+
+  let attempt = await run();
+
+  // An isolated failure on a path that was working is contention, not a network
+  // change. Retry the SAME address once and absorb it, so a blip lasting a
+  // single poll never reaches the collectors as an error, never logs, and never
+  // counts toward abandoning the address. Guarded so a genuinely dead host does
+  // not pay a doubled timeout on every call — see shouldRetryTransient.
+  if (!attempt.ok && !options.host && shouldRetryTransient(spark, targetHost)) {
+    attempt = await run();
+  }
 
   if (attempt.ok) {
     reportSuccess(spark, targetHost);
