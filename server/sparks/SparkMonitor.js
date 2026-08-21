@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { SystemCollector } from "../collectors/SystemCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
+import { TrainingProbe } from "../collectors/TrainingProbe.js";
 import { sshTest, sshExec } from "../collectors/ssh.js";
 import {
   applyLivenessObservation,
@@ -44,6 +45,7 @@ export class SparkMonitor {
     this.spark = spark;
     this._onWolMac = typeof options.onWolMac === "function" ? options.onWolMac : null;
     this.collector = new SystemCollector(spark);
+    this.trainingProbe = new TrainingProbe(spark);
 
     // One LlmProbe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
@@ -73,6 +75,7 @@ export class SparkMonitor {
       network: this.collector._defaultNetwork(),
       unifiedMemory: this.collector._defaultUnifiedMemory(),
       llm: [],
+      training: { active: false },
     };
     this._lastUpdate = {};
 
@@ -159,6 +162,8 @@ export class SparkMonitor {
     if (this._running) return;
     this._running = true;
     this._poll();
+    this._intervals.push(setInterval(() => this._pollDomain("training"), POLL_INTERVAL_LLM));
+    void this._pollDomain("training");
     this._intervals.push(setInterval(() => this._pollDomain("gpu"), POLL_INTERVAL_GPU));
     this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
     this._intervals.push(setInterval(() => this._pollDomain("network"), POLL_INTERVAL_NETWORK));
@@ -299,6 +304,7 @@ export class SparkMonitor {
         network: retain ? this._metrics.network : blank.network,
         unifiedMemory: retain ? this._metrics.unifiedMemory : blank.unifiedMemory,
         llm: this._metrics.llm,
+        training: this._metrics.training || { active: false },
       },
     };
   }
@@ -444,6 +450,11 @@ export class SparkMonitor {
         case "memory":
           result = await this.collector.collectUnifiedMemory();
           break;
+        case "training":
+          // A fine-tuning node serves no endpoint, so without this it reads as
+          // idle while running the most expensive job on the cluster.
+          result = await this.trainingProbe.probe();
+          break;
         case "llm":
           // Probe all ports in parallel
           result = await Promise.all(
@@ -482,6 +493,9 @@ export class SparkMonitor {
           break;
         case "memory":
           this._metrics.unifiedMemory = result;
+          break;
+        case "training":
+          this._metrics.training = result;
           break;
         case "llm": {
           const nowMs = Date.now();

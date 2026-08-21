@@ -376,6 +376,67 @@ function SparkCard({
             );
           })()}
 
+          {/* Training status. A fine-tuning node serves no LLM endpoint, so every
+              other panel reads it as idle while running the most expensive job on
+              the cluster: the LLM probe finds nothing and the model row stays blank. */}
+          {(() => {
+            const t = (spark as any)?.metrics?.training;
+            if (!t?.active) return null;
+            const pct = typeof t.pct === "number" ? t.pct : 0;
+            const drop =
+              typeof t.firstLoss === "number" && typeof t.loss === "number"
+                ? t.loss - t.firstLoss
+                : null;
+            return (
+              <div className="rounded-lg border border-border/60 bg-surface/40 p-3">
+                <div className="flex items-center justify-between pb-2">
+                  <span className="text-xs font-medium uppercase tracking-wide text-muted">
+                    Training · {t.script ?? "run"}
+                  </span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${
+                      t.phase === "evaluating"
+                        ? "bg-warning/20 text-warning"
+                        : "bg-accent/20 text-accent"
+                    }`}
+                  >
+                    {t.phase ?? "training"}
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-border">
+                  <div
+                    className="metric-bar-fill h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+                    style={{ ["--bar-pct" as string]: `${pct}%` }}
+                  />
+                </div>
+                <div className="grid grid-cols-4 gap-x-3 gap-y-2 pt-2.5">
+                  <MiniStat
+                    label="Step"
+                    value={t.maxSteps ? `${t.step ?? 0} / ${t.maxSteps}` : String(t.step ?? "—")}
+                    bold={false}
+                  />
+                  <MiniStat label="Progress" value={`${pct}%`} bold={false} />
+                  <MiniStat
+                    label="Loss"
+                    tone={drop !== null && drop < 0 ? "accent" : "default"}
+                    value={
+                      typeof t.loss === "number"
+                        ? `${t.loss}${drop !== null ? ` (${drop >= 0 ? "+" : ""}${drop.toFixed(2)})` : ""}`
+                        : "—"
+                    }
+                    bold={false}
+                  />
+                  <MiniStat label="ETA" value={t.remaining ?? "—"} bold={false} />
+                </div>
+                {typeof t.checkpoints === "number" && (
+                  <div className="pt-2 text-[10px] text-muted">
+                    {t.checkpoints} checkpoint{t.checkpoints === 1 ? "" : "s"} saved
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Live RDMA rate, from the HCA counters — netdev bytes stay near zero under RoCE.
               Shares the compute-process row so no extra line is introduced. */}
           {(() => {
