@@ -1104,6 +1104,10 @@ export class LlmProbe {
     const metricsLive = this.serverIsOpenAI !== null && this.authOpen !== false;
     return {
       available: metricsLive,
+      // The port this probe is actually talking to. It is not always llmPorts[0] --
+      // a Spark may configure several and serve on the last of them, and the probe can
+      // re-resolve to a different port at runtime. Without this the UI had to guess.
+      port: this.port,
       backend: this.backendType,
       modelId: this.modelId || null,
       modelPath: this.modelPath || null,
@@ -1134,6 +1138,7 @@ export class LlmProbe {
   _defaultLlm() {
     return {
       available: false,
+      port: this.port,
       backend: this.backendType,
       modelId: null,
       modelPath: null,

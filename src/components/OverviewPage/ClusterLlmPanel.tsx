@@ -7,6 +7,7 @@ import {
   fmtInt,
   fmtPct,
   fmtSeconds,
+  observedTopology,
 } from "./clusterModel";
 
 /**
@@ -61,6 +62,7 @@ export function ClusterLlmPanel({
 }) {
   const head = findHead(sparks) ?? sparks.find((s) => activeLlm(s)) ?? null;
   const workers = findWorkers(sparks);
+  const topo = observedTopology(sparks);
   const llm = activeLlm(head);
 
   if (!llm) {
@@ -195,8 +197,20 @@ export function ClusterLlmPanel({
         />
         <Stat
           label="Topology"
-          value={workers.length ? `configured TP=${workers.length + 1}` : "single node"}
-          title="Configured from the cluster layout. Per-rank health is not probed yet."
+          value={
+            topo && (topo.nnodes ?? 0) > 1
+              ? `TP=${topo.tpSize ?? workers.length + 1} · ${topo.nnodes} nodes`
+              : workers.length
+                ? `configured TP=${workers.length + 1}`
+                : topo
+                  ? "single node"
+                  : "—"
+          }
+          title={
+            topo
+              ? `Read from the running ${topo.engine} process${topo.source ? ` (${topo.source})` : ""}.`
+              : "No serving engine observed; falls back to the configured layout."
+          }
         />
         <Stat
           label="Slots"

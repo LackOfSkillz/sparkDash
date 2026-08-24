@@ -12,6 +12,7 @@ import {
   fmtPair,
   fmtRate,
   isGenerating,
+  activeLlmPort,
 } from "./clusterModel";
 
 /**
@@ -160,9 +161,9 @@ export function ClusterSummary({
         />
         <Field
           label="API"
-          value={head ? `${head.name}:${head.llmPort}` : "—"}
+          value={head ? `${head.name}:${activeLlmPort(head) ?? head.llmPort}` : "—"}
           tone={llm ? "success" : "muted"}
-          title={head ? `Model served from ${head.name} on port ${head.llmPort}` : undefined}
+          title={head ? `Model served from ${head.name} on port ${activeLlmPort(head) ?? head.llmPort}` : undefined}
         />
       </div>
 

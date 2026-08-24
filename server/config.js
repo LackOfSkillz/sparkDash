@@ -30,6 +30,10 @@ const POLL_INTERVAL_LLM = parseInt(process.env.POLL_INTERVAL_LLM || "2000", 10);
 const POLL_INTERVAL_BANDWIDTH = parseInt(process.env.POLL_INTERVAL_BANDWIDTH || "2000", 10);
 // Dedicated liveness (sshTest / local ping) cadence — not a metric domain.
 const POLL_INTERVAL_LIVENESS = parseInt(process.env.POLL_INTERVAL_LIVENESS || "5000", 10);
+// Serving topology changes only when someone relaunches an engine, so this is polled
+// far more slowly than hardware telemetry: the probe shells out to `docker inspect`,
+// which is not worth running every two seconds to learn the same answer.
+const POLL_INTERVAL_TOPOLOGY = parseInt(process.env.POLL_INTERVAL_TOPOLOGY || "30000", 10);
 
 // ─── Port ────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "5555", 10);
@@ -85,6 +89,7 @@ export {
   POLL_INTERVAL_LLM,
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
+  POLL_INTERVAL_TOPOLOGY,
   PORT,
   LLM_PORT,
   DGX_SPARK,

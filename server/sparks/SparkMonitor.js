@@ -21,6 +21,7 @@ import {
   POLL_INTERVAL_LLM,
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
+  POLL_INTERVAL_TOPOLOGY,
   LLM_PORT,
   HOST_PATHS,
 } from "../config.js";
@@ -76,6 +77,8 @@ export class SparkMonitor {
       unifiedMemory: this.collector._defaultUnifiedMemory(),
       llm: [],
       training: { active: false },
+      /** Observed serving topology; null until the first probe answers. */
+      inferenceTopology: null,
     };
     this._lastUpdate = {};
 
@@ -168,6 +171,7 @@ export class SparkMonitor {
     this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
     this._intervals.push(setInterval(() => this._pollDomain("network"), POLL_INTERVAL_NETWORK));
     this._intervals.push(setInterval(() => this._pollDomain("storage"), POLL_INTERVAL_STORAGE));
+    this._intervals.push(setInterval(() => this._pollDomain("topology"), POLL_INTERVAL_TOPOLOGY));
     this._intervals.push(setInterval(() => this._pollDomain("ram"), POLL_INTERVAL_CPU));
     this._intervals.push(setInterval(() => this._pollDomain("memory"), POLL_INTERVAL_BANDWIDTH));
     this._restartLlmPollInterval();
@@ -305,6 +309,7 @@ export class SparkMonitor {
         unifiedMemory: retain ? this._metrics.unifiedMemory : blank.unifiedMemory,
         llm: this._metrics.llm,
         training: this._metrics.training || { active: false },
+        inferenceTopology: this._metrics.inferenceTopology,
       },
     };
   }
@@ -419,6 +424,9 @@ export class SparkMonitor {
       this._pollDomain("ram"),
       this._pollDomain("memory"),
       this._pollDomain("llm"),
+      // Probed on the first cycle too, so the overview knows the shape of the
+      // deployment immediately rather than after the first slow interval.
+      this._pollDomain("topology"),
     ]);
   }
 
@@ -449,6 +457,9 @@ export class SparkMonitor {
           break;
         case "memory":
           result = await this.collector.collectUnifiedMemory();
+          break;
+        case "topology":
+          result = await this.collector.collectInferenceTopology();
           break;
         case "training":
           // A fine-tuning node serves no endpoint, so without this it reads as
@@ -493,6 +504,12 @@ export class SparkMonitor {
           break;
         case "memory":
           this._metrics.unifiedMemory = result;
+          break;
+        case "topology":
+          // Only overwrite on a conclusive read. A probe that returned nothing means the
+          // host did not answer, not that the cluster was dismantled — keeping the last
+          // known topology stops the overview flipping to STANDALONE on one timeout.
+          if (result) this._metrics.inferenceTopology = result;
           break;
         case "training":
           this._metrics.training = result;

@@ -4,6 +4,7 @@ import { HOST_PATHS, GPU_MEMORY_JSON_PATH, DGX_SPARK, HARDWARE_DEFAULTS } from "
 import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
 import { parseRdmaPorts, rdmaProbeCommand, toRdmaPortMetrics } from "./rdma.js";
+import { detectTopology, inferenceTopologyProbeCommand } from "./inferenceTopology.js";
 
 /**
  * SystemCollector — collects hardware metrics for a Spark.
@@ -116,6 +117,26 @@ export class SystemCollector {
     } catch (err) {
       console.error(`[SystemCollector] Network error for ${this.spark.id}:`, err.message);
       return this._defaultNetwork();
+    }
+  }
+
+  /**
+   * Collect the serving engine's own view of the cluster topology.
+   *
+   * Reports what is RUNNING, not what was configured, so a two-node tensor-parallel
+   * deployment is recognised as head+worker without anyone labelling it by hand.
+   * Returns null when nothing conclusive was seen — an unreachable or docker-less
+   * host has told us nothing, and must not overwrite a configured role with an
+   * absence of evidence.
+   */
+  async collectInferenceTopology() {
+    const cmd = inferenceTopologyProbeCommand();
+    try {
+      const out = this.spark.isLocal ? await this._execOnHostNet(cmd) : await sshExec(this.spark, cmd);
+      return detectTopology(out);
+    } catch (err) {
+      // Additive telemetry: never let it break a poll cycle for real hardware metrics.
+      return null;
     }
   }
 

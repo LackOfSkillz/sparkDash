@@ -62,6 +62,23 @@ export function activeLlm(spark: SparkSnapshot | null | undefined): LlmMetrics |
 }
 
 /**
+ * The port the model is actually served on.
+ *
+ * `spark.llmPort` is merely the first CONFIGURED port, so a Spark configured with
+ * [8000, 8080, 8888] and serving on 8888 was labelled with a dead 8000. Prefer the
+ * port the answering probe reports, and fall back to index alignment for readings
+ * captured before probes carried one.
+ */
+export function activeLlmPort(spark: SparkSnapshot | null | undefined): number | null {
+  if (!spark) return null;
+  const arr = spark.metrics?.llm;
+  if (!Array.isArray(arr)) return spark.llmPort ?? null;
+  const idx = arr.findIndex((l) => l?.available);
+  if (idx < 0) return spark.llmPort ?? null;
+  return arr[idx]?.port ?? spark.llmPorts?.[idx] ?? spark.llmPort ?? null;
+}
+
+/**
  * Presentation role. A Spark persisted as `standalone` is shown as HEAD only when it actually
  * heads something — i.e. some other Spark is a worker. A lone standalone stays STANDALONE.
  * This changes labels only; nothing persisted is rewritten.
@@ -99,6 +116,18 @@ export function findHead(sparks: SparkSnapshot[]): SparkSnapshot | null {
   const explicit = sparks.find((s) => resolveSparkRole(s) === "head");
   if (explicit) return explicit;
   return headStandalone(sparks);
+}
+
+/**
+ * The serving engine's own account of the deployment, taken from whichever node
+ * reports a multi-node rank. Preferred over counting configured workers, which only
+ * ever described the layout someone typed in.
+ */
+export function observedTopology(sparks: SparkSnapshot[]) {
+  const withTopo = sparks
+    .map((s) => s.metrics?.inferenceTopology)
+    .filter((t): t is NonNullable<typeof t> => Boolean(t));
+  return withTopo.find((t) => (t.nnodes ?? 0) > 1) ?? withTopo[0] ?? null;
 }
 
 export function findWorkers(sparks: SparkSnapshot[]): SparkSnapshot[] {

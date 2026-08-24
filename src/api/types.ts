@@ -204,6 +204,8 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
+  /** The port this reading came from; not necessarily the first configured one. */
+  port?: number | null;
   backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
   modelId: string | null;
   modelPath: string | null;
@@ -263,6 +265,26 @@ export interface LlmPosture {
 }
 
 // ─── Full metrics snapshot ────────────────────────────────
+/**
+ * What the serving engine says about its own parallelism, read from its command line.
+ *
+ * This is OBSERVED, not configured: it is how the overview can tell a genuine two-node
+ * tensor-parallel deployment from two unrelated boxes without anyone labelling them.
+ */
+export interface InferenceTopology {
+  engine: "vllm" | "sglang" | string;
+  /** "docker" or "host" — where the command line was read from. */
+  source: string | null;
+  tpSize: number | null;
+  ppSize: number | null;
+  /** Node count for the deployment; >1 means this is one rank of a cluster. */
+  nnodes: number | null;
+  nodeRank: number | null;
+  headless: boolean;
+  /** Role implied by the above, or null when nothing conclusive was observed. */
+  role: SparkRole | null;
+}
+
 export interface SparkMetrics {
   gpu: GpuMetrics | null;
   cpu: CpuMetrics | null;
@@ -272,6 +294,8 @@ export interface SparkMetrics {
   unifiedMemory: UnifiedMemoryMetrics | null;
   /** Array of LLM metrics, one per configured port. Empty array when no ports. */
   llm: LlmMetrics[];
+  /** Observed serving topology; null until a probe answers conclusively. */
+  inferenceTopology?: InferenceTopology | null;
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────

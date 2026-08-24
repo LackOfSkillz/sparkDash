@@ -594,6 +594,14 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const head = findHead(visibleSparks);
   const isCluster = head !== null && visibleSparks.length > 1;
 
+  // Inference telemetry is a property of a node that is SERVING, not of cluster
+  // topology. Gating it on `isCluster` meant that correcting a mislabelled
+  // worker to standalone also silently dropped tok/s, TTFT/E2E/ITL and KV-cache
+  // readings that were accurate the whole time. ClusterLlmPanel already falls
+  // back to any serving spark when there is no head, so it renders correctly
+  // for independent nodes.
+  const hasServingNode = visibleSparks.some((s) => activeLlm(s) !== null);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
       <div className="flex flex-wrap items-end justify-between gap-6">
@@ -675,7 +683,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         ))}
       </div>
 
-      {isCluster && (
+      {(isCluster || hasServingNode) && (
         <ClusterLlmPanel
           sparks={visibleSparks}
           tpsHistory={tpsHistory}
